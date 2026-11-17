@@ -80,6 +80,10 @@ extension ActionRegistry {
         // later with this invocation does not report this press's age.
         var handed = invocation
         handed.inputTimestamp = nil
+        // A person's run its handler refuses only while cmux is starting is held, not refused (`refusalDeferrals`).
+        let outermost = personRun == nil && run.origin == .user && !isCapturingRefusal && !refusalDeferrals.isEmpty
+        if outermost { personRun = PersonRun(id: id, invocation: handed) }
+        defer { if outermost { personRun = nil } }
         // The effect is settled inside the run's scopes, so the remote half it starts keeps the run's
         // view-change permission and machine routing.
         ActionRunScope.$current.withValueInTask(run) {
