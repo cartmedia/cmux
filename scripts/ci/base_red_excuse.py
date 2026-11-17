@@ -6073,6 +6073,15 @@ def ws_check_names_step(described: str, step: str) -> bool:
 
 UNITTEST_RED = re.compile(r"^(?:FAIL|ERROR): (\S.*)$")
 UNITTEST_SUMMARY = re.compile(r"^FAILED \(([^)]*)\)$")
+# A unittest failure block's parts, on lines lines_of has stripped: the separator lines that end it, a frame's
+# `File "...", line N` line, and the caret line under a frame's source (Python 3.11+). What is left after the frames is
+# the failure's own text: its exception line and, for an assertEqual, the diff.
+UNITTEST_RULE = re.compile(r"^(?:={70,}|-{70,})$")
+UNITTEST_FRAME = re.compile(r'^File ".*", line \d+')
+UNITTEST_CARETS = re.compile(r"^[\^~ ]+$")
+# The line a traceback ends with (`AssertionError: ...`, `subprocess.CalledProcessError: ...`, `KeyError: 'x'`): never
+# skipped as a frame's source line when Python printed none.
+UNITTEST_RAISED = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt|Warning|Iteration|Failure)\b")
 # A step that crashed (a signal, a fatal interpreter error) is never compared by its test names: a crash after a
 # complete unittest summary would otherwise hide behind a failure the base shares (cmux#36219 F1).
 WS_CHECK_CRASH = re.compile(r"Segmentation fault|core dumped|Fatal Python error|\bKilled\b|\bAborted\b|"
@@ -6262,7 +6271,8 @@ def ws_check_status(repo: str, sha: str, github) -> dict | None:
 
 
 def ws_check_step(lines: list[str], end: int, step: str) -> dict:
-    """{"tests", "lines"} for red STEP, whose closing line is LINES[END]; Refused when its output cannot be read."""
+    """{"tests", "lines", "failures" ({test: its failure text, unittest_failures'})} for red STEP, whose closing line
+    is LINES[END]; Refused when its output cannot be read."""
     start = next((n for n in range(end - 1, -1, -1) if lines[n] in (f"##[group]{step}", f"::group::{step}")), None)
     if start is None:
         raise Refused(f"no '##[group]{step}' line before its result")
@@ -6292,12 +6302,52 @@ def ws_check_step(lines: list[str], end: int, step: str) -> dict:
     own = {norm(text) for text in section if text.startswith("ws-check: ")}
     if not reds and not section:
         raise Refused(f"'{step}' failed with no failing test and no output to compare")
-    return {"tests": frozenset(reds), "lines": frozenset(own if reds else {norm(text) for text in section})}
+    failures: dict[str, set[str]] = {}
+    for test, body in unittest_failures(section):
+        failures.setdefault(test, set()).update(norm(text) for text in body)
+    return {"tests": frozenset(reds), "lines": frozenset(own if reds else {norm(text) for text in section}),
+            "failures": {test: frozenset(body) for test, body in failures.items()}}
+
+
+def unittest_failures(section: list[str]) -> list[tuple[str, list[str]]]:
+    """(test, its failure text) for each FAIL/ERROR block of a unittest run's SECTION (lines_of's lines, blanks
+    dropped): the block's lines after its traceback's frames, up to the next separator. A lint test that lists its
+    offenders fails with them in this text (its AssertionError and diff), so the base's red of that test is told apart
+    from a head's red of it that lists a new offender (leo-workspace#5683)."""
+    found: list[tuple[str, list[str]]] = []
+    at = 0
+    while at < len(section):
+        match = UNITTEST_RED.match(section[at])
+        at += 1
+        if not match:
+            continue
+        if at < len(section) and UNITTEST_RULE.match(section[at]):  # the dashes under "FAIL: test"
+            at += 1
+        body: list[str] = []
+        frames = False
+        while at < len(section) and not UNITTEST_RULE.match(section[at]) and not UNITTEST_RED.match(section[at]):
+            text = section[at]
+            at += 1
+            if text == "Traceback (most recent call last):":
+                frames = True
+            elif frames and UNITTEST_FRAME.match(text):
+                # Its source line, when Python printed one, and the carets under it.
+                if at < len(section) and not (UNITTEST_FRAME.match(section[at]) or UNITTEST_RAISED.match(section[at])
+                                              or UNITTEST_RULE.match(section[at])):
+                    at += 1
+                while at < len(section) and UNITTEST_CARETS.match(section[at]):
+                    at += 1
+            else:
+                frames = False
+                body.append(text)
+        found.append((match[1], body))
+    return found
 
 
 def ws_check_verdict(repo: str, sha: str, github) -> tuple[str, dict]:
     """(kind, verdict) of SHA's ws-check status: kind "none" (no result), "pass" or "fail". A fail's verdict has
-    "steps" ({step: {"tests", "lines"}}), "url" and "at" (the status time); Refused when a failure cannot be read."""
+    "steps" ({step: {"tests", "lines" (with each failing test's failure text)}}), "url" and "at" (the status time);
+    Refused when a failure cannot be read."""
     status = ws_check_status(repo, sha, github)
     if status is None:
         return "none", {"why": "no ws-check status"}
@@ -6375,6 +6425,14 @@ def ws_check_verdict(repo: str, sha: str, github) -> tuple[str, dict]:
                 suite = WS_CHECK_SHARD.sub("", unit.strip()[1:-1]) if unit else ""
                 tests |= {f"[{suite}] {test}" if suite else test for test in red["tests"]}
                 printed |= red["lines"]
+                # Each failing test's failure text, a line each, named for its test: a test red on the base is the
+                # same red only when it fails the same way. 2026-11-17: leo-workspace#5683 at 16b96c09 merged with its
+                # test_text_io_encoding.py red excused by name, main d240eaab failing that test too, though the head's
+                # failure listed a new offender (tools/test_merge_hold.py) main's did not. Numbers are masked
+                # (normalise_error), so the same offenders at other counts, lines or times still match.
+                # The text first, so a refusal's cut line shows what failed before whose failure it is.
+                printed |= {f"{text} (in {f'[{suite}] ' if suite else ''}{test})"
+                            for test, body in red["failures"].items() for text in body}
         except Refused as error:
             raise Refused(f"{where}: run {link[1]}: {error}") from None
         steps[step] = {"tests": frozenset(tests), "lines": frozenset(printed)}
@@ -6577,11 +6635,14 @@ def ws_check_red(repo: str, base: str, sha: str, github, evidence: "Evidence | N
                 lines.append(f"not excused '{WS_CHECK}' test '{step} :: {test}': not red on {tested}{older()}"
                              f"{mb_note()}; this head's own red")
         unmatched = [line for line in sorted(red["lines"]) if on((step, "line", line)) is None]
-        label = f"step '{step}'" + (" (its ws-check lines)" if red["tests"] else " (no test names: its output)")
+        label = f"step '{step}'" + (" (its failures' and ws-check lines)" if red["tests"]
+                                    else " (no test names: its output)")
         if unmatched:
             missing.append(f"'{step}' line '{unmatched[0][:200]}'")
+            # A few, not one: a new offender in a lint's list is often not its first new line (leo-workspace#5683).
+            then = "".join(f", then '{line[:200]}'" for line in unmatched[1:3])
             lines.append(f"not excused '{WS_CHECK}' {label}: {len(unmatched)} of {len(red['lines'])} line(s) not on "
-                         f"{tested}{older()}{mb_note()}, first '{unmatched[0][:200]}'; this head's own red")
+                         f"{tested}{older()}{mb_note()}, first '{unmatched[0][:200]}'{then}; this head's own red")
         elif not red["tests"]:
             found = {on((step, "line", line))[0] for line in red["lines"]}
             lines.append(f"excused '{WS_CHECK}' {label}: its {len(red['lines'])} line(s) are red on {base} "
