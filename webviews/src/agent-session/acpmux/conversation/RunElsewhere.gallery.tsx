@@ -129,6 +129,9 @@ function Stage({ look, shown, note = "line" }: Props) {
       <RunElsewhereContext.Provider value={runs}>
         <div className="acpmux-shell cv-run-elsewhere-looks" data-look={look} data-note={note} style={{ padding: 16 }}>
           <div className="cv-tools">
+            <CommandRow item={call("wait", "python3 tools/merge_hold.py explain manaflow-ai/cmux 44505 2>&1")} />
+          </div>
+          <div className="cv-tools">
             <CommandRow item={call("test", "cargo test -p cmux-core")} />
           </div>
           <div className="cv-tools">
