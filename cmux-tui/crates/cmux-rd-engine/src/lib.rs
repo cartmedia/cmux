@@ -744,6 +744,9 @@ impl MediaEngine {
         let idr_allowed = state
             .last_forced_idr_us
             .is_none_or(|t| now_us.saturating_sub(t) >= MIN_FORCED_IDR_INTERVAL_US);
+        if fb.need_recovery {
+            eprintln!("DBG engine need_recovery idr_allowed={idr_allowed} now_us={now_us} action={action:?}");
+        }
         if fb.need_recovery && idr_allowed {
             state.last_forced_idr_us = Some(now_us);
             state.force_idr = Some(IdrReason::Recovery);

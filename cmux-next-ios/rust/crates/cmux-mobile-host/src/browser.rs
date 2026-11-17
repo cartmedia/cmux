@@ -871,6 +871,7 @@ pub(crate) async fn splice(
                 _ => return Ok(()),
             },
             requested = keyframe => {
+                tracing::info!(target: "dbgfb", requested, "DBG browser got keyframe ask");
                 if requested {
                     bridge.request_keyframe();
                 }
@@ -907,7 +908,11 @@ pub(crate) async fn splice(
             for frame in bridge.tick(now) {
                 let _ = c.send(lane_frame(frame)).await;
             }
-            let feedback = bridge.feedback(c.state().congested, now);
+            let congested = c.state().congested;
+            let feedback = bridge.feedback(congested, now);
+            if !feedback.is_empty() && cmux_rd_proto::DatagramHeader::decode(&feedback[5..]).ok().and_then(|(_, b)| cmux_rd_proto::Feedback::decode(b).ok()).is_some_and(|f| f.need_recovery) {
+                tracing::info!(target: "dbgfb", congested, "DBG bridge feedback need_recovery");
+            }
             if !feedback.is_empty() && host_write.write_all(&feedback).await.is_err() {
                 return Ok(());
             }

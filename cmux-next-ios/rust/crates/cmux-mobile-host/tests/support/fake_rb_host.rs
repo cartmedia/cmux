@@ -137,6 +137,7 @@ async fn session(mut stream: TcpStream, secret: &str, mut url: String) -> String
             // number; an IDR carries an SPS and a PPS first, as VideoToolbox's do.
             let mut au = Vec::new();
             if req.force_idr {
+                tracing::info!(target: "dbgfb", frame = req.frame, "DBG fake host encodes IDR");
                 au.extend_from_slice(&[
                     0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80,
                 ]);

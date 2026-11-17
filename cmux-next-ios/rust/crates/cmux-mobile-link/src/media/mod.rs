@@ -243,6 +243,7 @@ impl Drop for RouteHandle {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.upgrade() {
             inner.table().remove(self.id);
+            tracing::info!(target: "dbgfb", id = self.id, "DBG route removed");
             inner.bump();
         }
     }
@@ -380,6 +381,7 @@ async fn route_watch(
             );
         }
         if ask {
+            tracing::info!(target: "dbgfb", "DBG route_watch asks keyframe");
             let _ = out.keyframes.send(());
         }
         let mut shown = shown;
@@ -443,6 +445,7 @@ impl VideoClaim {
         }
         let keyframe = h264::is_keyframe(&frame.access_unit);
         let (decision, ask, switch) = self.inner.table().decide(keyframe, std::time::Instant::now());
+        tracing::info!(target: "dbgfb", keyframe, ask, ?switch, decision = ?match &decision { routes::Decision::Send { route, .. } => format!("send {route}"), d => format!("{d:?}") }, "DBG decide");
         if ask {
             let _ = self.inner.keyframes.send(());
         }
@@ -648,6 +651,9 @@ impl InInner {
         let tag = tag::peek(&frame.access_unit);
         let mut gate = self.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let verdict = gate.admit(id, frame.keyframe, tag, frame.rtp_timestamp, std::time::Instant::now());
+        if frame.keyframe {
+            tracing::info!(target: "dbgfb", source = id, ?verdict, carrier = ?frame.carrier.map(CarrierKind::name), "DBG phone keyframe at gate");
+        }
         if verdict != Admit::Pass {
             // Rejections are normal for a moment after a route switch; one
             // that asks means nothing passed for 250 ms (at most 4 a second).

@@ -206,6 +206,7 @@ async fn browser_stream_over_wireguard() {
 /// (`media_session.rs`) exactly as in production.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn browser_video_rides_the_media_session_beside_wireguard() {
+    let _ = tracing_subscriber::fmt().with_env_filter("dbgfb=info,cmux_mobile_link=debug,cmux_mobile_host=debug,cmux_mobile_link_ffi=debug").with_test_writer().try_init();
     let server = FakeSignaling::start(FakeOptions::default()).await;
     let sockets = tempfile::tempdir().unwrap();
     let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
