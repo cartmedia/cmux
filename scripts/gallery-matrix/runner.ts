@@ -46,6 +46,9 @@ const IN_VM = process.env.CMUX_GALLERY_IN_VM === "1";
 /** `CMUX_GALLERY_RECORD_VIDEO=1`: one WebM per case and engine (`<case>-<engine>.webm`, `video` in results.json),
  *  for a focused motion review run (undeclared-run.sh); never a gate. */
 const RECORD_VIDEO = process.env.CMUX_GALLERY_RECORD_VIDEO === "1";
+/** `CMUX_GALLERY_ECHO_TRACE=1`: the page's `motion-trace` console lines go to the runner's output (a frame trace while
+ *  finding an undeclared move; undeclared-run.sh). */
+const ECHO_TRACE = process.env.CMUX_GALLERY_ECHO_TRACE === "1";
 const LEDGER_PATH = process.env.CMUX_GALLERY_FREESTYLE_LEDGER ?? "/Users/lawrence/fun/cmuxterm-hq/.cmux-scratch/pane-protocol/gallery/freestyle-ledger.json";
 /** Published matrix runs (tailnet, every member): https://cmux-lawrences-mac-mini.tail137216.ts.net:18796/matrix/<run>/ */
 const PUBLISH_URL = "https://cmux-lawrences-mac-mini.tail137216.ts.net:18796/matrix";
@@ -245,6 +248,7 @@ async function renderCase(baseUrl: string, item: MatrixCase, engine: Engine, out
   try {
     const page = await context.newPage();
     recording = page.video();
+    if (ECHO_TRACE) page.on("console", (message) => { const text = message.text(); if (text.startsWith("motion-trace")) console.log(`${item.id} ${text}`); });
     // The renderer's main-thread CPU time (Chromium's Performance metrics, `ThreadTime`): the work the
     // stage did to get ready, which a loaded runner does not stretch the way it stretches wall time.
     // Optional: a context with no CDP (another engine, a test double) is held to wall time instead.

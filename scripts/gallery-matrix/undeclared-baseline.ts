@@ -25,7 +25,7 @@ import { parseArgs } from "node:util";
 export type UndeclaredRow = { count: number; issue: string };
 export type UndeclaredBaseline = { $comment?: string; states: Record<string, UndeclaredRow> };
 
-type Move = { label: string; surface?: string; dx: number; dy: number; dw?: number; dh?: number };
+type Move = { label: string; surface?: string; frame?: number; dx: number; dy: number; dw?: number; dh?: number };
 type Phase = { undeclared?: number; undeclaredMoves?: Move[]; step?: string } | null | undefined;
 export type UndeclaredResult = {
   params?: Record<string, unknown>;
@@ -43,7 +43,7 @@ const stateOf = (result: { params?: Record<string, unknown> }): string =>
 const describe = (name: string, phase: Phase): string => {
   const moves = (phase?.undeclaredMoves ?? [])
     .slice(0, 2)
-    .map((move) => `${move.label} [${move.dx} ${move.dy} ${move.dw ?? 0} ${move.dh ?? 0}]`);
+    .map((move) => `${move.label} [${move.dx} ${move.dy} ${move.dw ?? 0} ${move.dh ?? 0}]${move.frame === undefined ? "" : ` @f${move.frame}`}`);
   return `${name}: ${phase?.undeclared ?? 0}${moves.length ? ` (${moves.join(", ")})` : ""}`;
 };
 
