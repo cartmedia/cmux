@@ -315,9 +315,9 @@ export function startBoxTracker(
     judged.push({ samples, declared });
     // A play that sets `cmuxMotionTrace` on its window logs each judged frame (undeclared-run.sh TRACE=1).
     if ((view as unknown as { cmuxMotionTrace?: boolean }).cmuxMotionTrace) {
-      const rows = [...samples].filter(([, sample]) => sample.surface === "transcript-row").slice(-6);
+      const rows = [...samples].filter(([, sample]) => sample.surface === "transcript-row");
       console.log(
-        `motion-trace judge f${judged.length - 1} t${view.performance.now().toFixed(0)} ${rows.map(([id, { box }]) => `${id}:${box.y.toFixed(1)}/${box.height.toFixed(1)}`).join(" ")}`,
+        `motion-trace judge f${judged.length - 1} t${view.performance.now().toFixed(0)} [${declared.map((d) => d.by).join(",")}] ${rows.map(([id, { box, label }]) => `${id}=${label.replace(/.*row /, "").replace("]", "")}:${box.y.toFixed(1)}/${box.height.toFixed(1)}`).join(" ")}`,
       );
     }
   };

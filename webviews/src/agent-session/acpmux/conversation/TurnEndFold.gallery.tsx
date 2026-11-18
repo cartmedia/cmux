@@ -215,6 +215,7 @@ function TurnEndFoldGallery({ variant, long = false }: { variant: Variant; long?
 
 /// Runs the turn to its end and waits for the fold.
 const runToFold: Play = async (ctx) => {
+  (ctx.document.defaultView as unknown as { cmuxMotionTrace?: boolean }).cmuxMotionTrace = true;
   await ctx.click({ testId: "turn-end-start" });
   await ctx.waitFor(() => ctx.find({ testId: "turn-end-state" }).textContent === "Turn folded", { capMs: 5_000 });
 };
