@@ -2368,6 +2368,7 @@
         "callerSession": true,
         "cancelToken": true,
         "class": true,
+        "cliCommand": true,
         "cliHost": true,
         "compression": true,
         "context": true,
