@@ -22,7 +22,8 @@
 # changed. A changed file keeps its fresh mtime: correctness never depends on
 # the snapshot. Without a mounted disk it does nothing (cold build).
 #
-# record (after the build, before the sticky disk's post step commits it):
+# record (after "Stage binary", in its own step, before the sticky disk's post
+# step commits it; never in the build step, whose output the prune may remove):
 # bound the disk (scripts/blacksmith-testbox-target-prune.sh), then record the
 # source mtimes and the commit next to the artifacts.
 #
@@ -55,8 +56,16 @@ source_record="$target/.machine-channel-warm-source"
 toolchain_record="$target/.machine-channel-warm-toolchain"
 toolchain="${MACHINE_CHANNEL_WARM_TOOLCHAIN:-}"
 registry="${CARGO_HOME:-$HOME/.cargo}/registry"
-# 40 GiB: one leg's six cargo groups leave about 10 GB of release output.
-max_bytes="${MACHINE_CHANNEL_WARM_MAX_BYTES:-$((40 * 1024 * 1024 * 1024))}"
+# 100 GiB, from measured use: after a build a leg's disk held 33.6-44.5 GB (run 44240874997,
+# 2026-11-18: thin x86_64 33.6 GB, thin aarch64 44.5 GB, fat x86_64 41.0 GB, fat aarch64
+# 38.8 GB; the same within 0.01 GB over 4 runs each). The old 40 GiB bound ("about 10 GB" per
+# leg) was below that, so the prune removed whole top-level entries once a disk passed it: the
+# leg's own target/<triple> (then "Stage binary" failed) or groups/ (groups 2-6 built cold).
+# 100 GiB is 2.2x the largest leg and the bound the Testbox prune settled on
+# (scripts/blacksmith-testbox-target-prune.sh). record caps it at 80% of the disk's real
+# size (df), so it never exceeds the sticky disk, and prints that size and the largest entries.
+# tests/test_ci_cmux_tui_fat_warm_target.py keeps it above measured use.
+max_bytes="${MACHINE_CHANNEL_WARM_MAX_BYTES:-$((100 * 1024 * 1024 * 1024))}"
 
 cpuinfo="${RUNNER_TEMP:-/tmp}/machine-channel-warm-cpu-$triple"
 printf 'model name\t: zig -Dtarget=%s\nflags\t: %s\n' "$triple" "$triple" > "$cpuinfo"
@@ -103,9 +112,20 @@ record() {
     echo "warm target: $link is not linked to the sticky disk; nothing to record"
     return 0
   fi
-  # Keep the triple this leg just built: its release binaries are staged after this step.
+  # The disk's real size bounds the bound: at most 80% of the filesystem (df), so a smaller
+  # disk than measured never fills. Printed with the largest entries, so growth is attributable.
+  local bound=$max_bytes disk_bytes
+  disk_bytes="$(df -B1 --output=size "$disk" 2>/dev/null | tail -n 1 | tr -cd '0-9')" || disk_bytes=""
+  if [[ -n "$disk_bytes" ]] && ((disk_bytes > 0 && disk_bytes * 8 / 10 < bound)); then
+    bound=$((disk_bytes * 8 / 10))
+  fi
+  df -B1 --output=size,used,avail "$disk" 2>/dev/null | sed 's/^/warm target: disk /' || true
+  echo "warm target: prune bound $bound bytes (configured $max_bytes, disk ${disk_bytes:-unknown})"
+  du -xB1 -d 2 "$target" 2>/dev/null | sort -rn | sed -n '2,9p' | sed "s#$target/##; s/^/warm target: largest /" || true
+  # Keep the triple this leg built: the next leg's group 1 starts from it ("Stage binary" has
+  # already copied its binaries; this runs in "Record the warm target", after it).
   CMUX_TARGET_PRUNE_KEEP="$triple" \
-    bash "$repo/scripts/ci/timeout.sh" 600 bash "$repo/scripts/blacksmith-testbox-target-prune.sh" "$target" "$max_bytes" \
+    bash "$repo/scripts/ci/timeout.sh" 600 bash "$repo/scripts/blacksmith-testbox-target-prune.sh" "$target" "$bound" \
     || echo "warning: prune failed; recording as is" >&2
   rm -f "$source_record"
   python3 -I "$repo/scripts/blacksmith-testbox-source-mtimes.py" record "$repo" "$manifest"
