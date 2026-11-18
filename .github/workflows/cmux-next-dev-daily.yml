@@ -28,10 +28,11 @@ jobs:
   # routing environment and is minted only on the refs the release environment allows (main, rc/**, v* tags), so
   # no other branch's picker code ever holds it; actions: read is the queue janitor's pool snapshot. A failed pick reads as
   # success, and sign then falls back to Blacksmith 6 vCPU. The pick is a few API reads (nightly.yml's twin: W44 p50
-  # 9 s on GitHub-hosted Ubuntu), so it takes hosted Ubuntu and Blacksmith Linux 4 vCPU on a re-run, never 16 or 32
-  # vCPU (Leo, 2026-11-01: "surely we measured the signign we dont need 32/16 just for signing").
+  # 9 s on GitHub-hosted Ubuntu), so it takes the 2 vCPU Blacksmith pool, never 16 or 32 vCPU (Leo, 2026-11-01:
+  # "surely we measured the signign we dont need 32/16 just for signing"). It took hosted Ubuntu on attempt 1 until
+  # 2026-11-18, when about 4,300 jobs queued there behind the organization's 20 hosted jobs at once.
   pick-sign-runner:
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || github.run_attempt > 1 && fromJSON(vars.RUNNER_POOLS).linux_4 || 'ubuntu-24.04' }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_2 || 'blacksmith-2vcpu-ubuntu-2404' }} # ephemeral-required: mints the routing App token
     environment:
       name: ci-routing-agent
       deployment: false

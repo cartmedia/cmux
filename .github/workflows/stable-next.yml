@@ -713,7 +713,7 @@ jobs:
     needs: [plan, sign]
     if: needs.plan.outputs.go == 'true'
     environment: ${{ github.ref == 'refs/heads/nightly-next' && github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && 'release-next' || '' }}
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -763,7 +763,7 @@ jobs:
       cancel-in-progress: false
     if: needs.plan.outputs.go == 'true' && !cancelled() && needs.crash-class.result == 'success' && needs.perf-budgets.result == 'success' && needs.sign.result == 'success' && needs.smoke-27.result == 'success' && needs.smoke-26.result == 'success' && needs.soak.result == 'success'
     environment: ${{ github.ref == 'refs/heads/nightly-next' && github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && 'release-next' || '' }}
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -854,7 +854,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.go == 'true' && github.ref == 'refs/heads/nightly-next' && github.event_name == 'workflow_dispatch' && inputs.mode == 'publish'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -885,7 +885,7 @@ jobs:
     needs: [slack-start, crash-class]
     if: always() && needs.slack-start.outputs.ts != '' && needs.crash-class.result != 'skipped'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -915,7 +915,7 @@ jobs:
     needs: [slack-start, perf-budgets]
     if: always() && needs.slack-start.outputs.ts != '' && needs.perf-budgets.result != 'skipped'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -930,7 +930,7 @@ jobs:
     needs: [slack-start, sign]
     if: always() && needs.slack-start.outputs.ts != '' && needs.sign.result != 'skipped'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -945,7 +945,7 @@ jobs:
     needs: [slack-start, smoke-27]
     if: always() && needs.slack-start.outputs.ts != '' && needs.smoke-27.result != 'skipped'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -960,7 +960,7 @@ jobs:
     needs: [slack-start, smoke-26]
     if: always() && needs.slack-start.outputs.ts != '' && needs.smoke-26.result != 'skipped'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -975,7 +975,7 @@ jobs:
     needs: [slack-start, soak]
     if: always() && needs.slack-start.outputs.ts != '' && needs.soak.result != 'skipped'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -990,7 +990,7 @@ jobs:
     needs: [plan, slack-start, crash-class, perf-budgets, sign, smoke-27, smoke-26, soak, publish]
     if: always() && github.ref == 'refs/heads/nightly-next' && github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && needs.plan.outputs.go != 'false'
     environment: release-next
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.CI_CLOUD_OVERFLOW_SAVED && fromJSON(vars.RUNNER_POOLS).linux_16 || fromJSON(vars.RUNNER_POOLS).linux_4 }}
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || fromJSON(vars.RUNNER_POOLS).linux_4 }}
     timeout-minutes: 10
     permissions:
       contents: read
