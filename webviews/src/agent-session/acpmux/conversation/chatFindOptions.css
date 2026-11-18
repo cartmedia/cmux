@@ -1,0 +1,205 @@
+/* Find in Chat's search operators (ChatFindBar.tsx, searchSyntax.ts): under the find pill, which
+   stays as it is (ui/findPill.css), the operator suggestions, the options row and the chips. Each
+   is the pill's own transient glass (Leo chose the glass find bar): the tooltip tint and its paired
+   ink, under the shared glass material's blur and lit rim over the popup's rim and drop, the opaque
+   popup surface under Reduce Transparency. They stack under the pill at its width, never wider
+   (`width: 0; min-width: 100%`), so the bar keeps its place and its measured box (the transcript's
+   fade hole, conversation.css) covers them. */
+.acpmux-find__bar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.acpmux-find__panel,
+.acpmux-find__chip {
+  box-sizing: border-box;
+  background: var(--tooltip-tint, var(--cmux-card-tint, var(--surface-popup, Canvas)));
+  -webkit-backdrop-filter: var(--glass-material-backdrop, var(--tooltip-blur, none));
+  backdrop-filter: var(--glass-material-backdrop, var(--tooltip-blur, none));
+  box-shadow: var(--glass-material-rim, 0 0 transparent), var(--ui-popup-shadow, var(--elevation-2));
+  color: var(--cmux-tooltip-ink, var(--cmux-text, CanvasText));
+  font-family: var(--font-ui);
+  animation: find-pill-in var(--ui-popup-open, 120ms) ease-out;
+  pointer-events: auto;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .acpmux-find__panel,
+  .acpmux-find__chip {
+    background: var(--surface-popup, Canvas);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: var(--ui-popup-shadow, var(--elevation-2));
+  }
+}
+:root[data-reduce-transparency] :is(.acpmux-find__panel, .acpmux-find__chip) {
+  background: var(--surface-popup, Canvas);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: var(--ui-popup-shadow, var(--elevation-2));
+}
+@media (prefers-reduced-motion: reduce) {
+  .acpmux-find__panel,
+  .acpmux-find__chip {
+    animation: none;
+  }
+}
+
+.acpmux-find__panel {
+  width: 0;
+  min-width: 100%;
+  border-radius: var(--ds-radius-popup, 12px);
+}
+
+/* The filters toggle, beside Aa in the pill's toggle group: the pill's own button. */
+.acpmux-find__filters svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Operator suggestions (`_acpmux/search_syntax` completions): a short list right under the field.
+   The arrows move the row, Tab or Return takes it, Escape closes the list first. */
+.acpmux-find__suggest {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+}
+.acpmux-find__suggestion {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--ds-radius-sm, 6px);
+  font-size: var(--text-body);
+  letter-spacing: var(--text-body--letter-spacing);
+  cursor: default;
+}
+.acpmux-find__suggestion[aria-selected="true"] {
+  background: color-mix(in srgb, var(--agent-accent, var(--cmux-accent)) 20%, transparent);
+}
+.acpmux-find__suggestion-label {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-detail);
+}
+.acpmux-find__suggestion-detail {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-caption);
+  letter-spacing: var(--text-caption--letter-spacing);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+
+/* The options row (VS Code's "files to include"): quick picks, lit while the query holds their
+   operator, and a folder field. Groups wrap to the pill's width. */
+.acpmux-find__options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 8px;
+  font-size: var(--text-caption);
+  letter-spacing: var(--text-caption--letter-spacing);
+}
+.acpmux-find__group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.acpmux-find__group-label {
+  margin-right: 4px;
+  opacity: 0.75;
+}
+.acpmux-find__pick {
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 11px /* radius-allow: concentric child of the find capsule */;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+}
+.acpmux-find__pick:hover {
+  background: color-mix(in srgb, currentColor 13%, transparent);
+}
+.acpmux-find__pick[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--agent-accent, var(--cmux-accent)) 22%, transparent);
+  color: var(--agent-lit-glyph, var(--cmux-lit-glyph, var(--agent-accent, var(--cmux-accent))));
+}
+.acpmux-find__pick:focus-visible,
+.acpmux-find__chip-remove:focus-visible {
+  outline: 2px solid var(--agent-accent, var(--cmux-accent));
+  outline-offset: -2px;
+}
+.acpmux-find__folder {
+  flex: 1 1 96px;
+  min-width: 80px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 11px /* radius-allow: concentric child of the find capsule */;
+  outline: none;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  color: inherit;
+  font: inherit;
+}
+.acpmux-find__folder::placeholder {
+  color: inherit;
+  opacity: 0.7;
+}
+.acpmux-find__folder:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--agent-accent, var(--cmux-accent));
+}
+
+/* The chips the daemon read (`parsed.chips`), right-aligned under the pill as the pill is in the
+   pane; each takes its text out of the query in one click. */
+.acpmux-find__chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  width: 0;
+  min-width: 100%;
+}
+.acpmux-find__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  max-width: 100%;
+  padding: 0 3px 0 9px;
+  border-radius: 12px /* radius-allow: concentric child of the find capsule */;
+  font-size: var(--text-caption);
+  letter-spacing: var(--text-caption--letter-spacing);
+}
+.acpmux-find__chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acpmux-find__chip-remove {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px /* radius-allow: concentric child of the chip capsule */;
+  background: none;
+  color: inherit;
+  opacity: 0.7;
+}
+.acpmux-find__chip-remove:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  opacity: 1;
+}
+.acpmux-find__chip-remove svg {
+  width: 10px;
+  height: 10px;
+}
