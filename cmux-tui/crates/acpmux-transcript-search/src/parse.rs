@@ -114,6 +114,9 @@ pub struct LineState {
 pub struct Line {
     pub at_ms: Option<i64>,
     pub docs: Vec<Doc>,
+    /// The session's working directory, when the line names it (Claude Code's `cwd` on each
+    /// prompt and reply, Codex's `session_meta.payload.cwd`).
+    pub cwd: Option<String>,
 }
 
 /// Reads one line; a line that is not JSON or holds nothing searchable gives no docs.
@@ -121,7 +124,9 @@ pub fn line(harness: Harness, bytes: &[u8], state: &mut LineState) -> Line {
     // Most lines are bookkeeping: skip them before parsing (an `api-request-blob` is megabytes).
     let wanted: &[&[u8]] = match harness {
         Harness::Claude => &[b"\"type\":\"user\"", b"\"type\":\"assistant\""],
-        Harness::Codex => &[b"\"response_item\"", b"\"compacted\"", b"\"type\":\"message\""],
+        Harness::Codex => {
+            &[b"\"response_item\"", b"\"compacted\"", b"\"type\":\"message\"", b"\"session_meta\""]
+        }
     };
     if !wanted.iter().any(|w| memchr::memmem::find(bytes, w).is_some()) {
         return Line::default();
@@ -134,7 +139,15 @@ pub fn line(harness: Harness, bytes: &[u8], state: &mut LineState) -> Line {
         Harness::Codex => codex(&record, state, &mut docs),
     }
     docs.retain(|d| !d.text.trim().is_empty());
-    Line { at_ms, docs }
+    let cwd = match harness {
+        Harness::Claude => record.get("cwd"),
+        Harness::Codex if record.get("type").and_then(Value::as_str) == Some("session_meta") => {
+            record.pointer("/payload/cwd")
+        }
+        Harness::Codex => None,
+    };
+    let cwd = cwd.and_then(Value::as_str).filter(|c| !c.is_empty()).map(str::to_owned);
+    Line { at_ms, docs, cwd }
 }
 
 fn claude(record: &Value, state: &mut LineState, docs: &mut Vec<Doc>) {

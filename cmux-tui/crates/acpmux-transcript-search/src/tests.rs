@@ -518,3 +518,172 @@ fn chats_find_each_sessions_newest_message_holding_every_word() {
     assert!(index.chats(&["parser".into(), "absent".into()], 1000, 40).unwrap().is_empty());
     assert!(index.chats(&[], 1000, 40).unwrap().is_empty());
 }
+
+fn claude_said(kind: &str, text: &str, at: &str, cwd: &str) -> String {
+    json!({"type": kind, "timestamp": at, "cwd": cwd,
+        "message": {"role": kind, "content": [{"type": "text", "text": text}]}})
+    .to_string()
+}
+
+/// The filters the query language gives (`syntax.rs`): `-word`, `before:`, `agent:`,
+/// `folder:`, phrases, and the case-sensitive toggle.
+#[test]
+fn operators_filter_by_exclusion_time_harness_folder_and_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b, c) =
+        (dir.path().join("a.jsonl"), dir.path().join("b.jsonl"), dir.path().join("c.jsonl"));
+    append(
+        &a,
+        &[
+            claude_said(
+                "user",
+                "Deploy the Parser fix",
+                "2026-11-17T09:00:00Z",
+                "/Users/x/Projects/cmux",
+            ),
+            claude_said(
+                "assistant",
+                "deploy failed: flaky test",
+                "2026-11-18T09:00:00Z",
+                "/Users/x/Projects/cmux",
+            ),
+        ],
+    );
+    append(
+        &b,
+        &[claude_said(
+            "user",
+            "deploy the parser docs",
+            "2026-11-18T10:00:00Z",
+            "/Users/x/Projects/Website",
+        )],
+    );
+    let codex_lines = [
+        json!({"timestamp": "2026-11-18T08:00:00Z", "type": "session_meta",
+            "payload": {"id": "c", "cwd": "/Users/x/Projects/cmux-ios"}}),
+        json!({"timestamp": "2026-11-18T08:00:01Z", "type": "response_item", "payload": {"type": "message",
+            "role": "user", "content": [{"type": "input_text", "text": "deploy from codex"}]}}),
+    ];
+    append(&c, &codex_lines.iter().map(ToString::to_string).collect::<Vec<_>>());
+    let index = Index::in_memory().unwrap();
+    for src in
+        [source(&a, "a"), source(&b, "b"), Source { harness: Harness::Codex, ..source(&c, "c") }]
+    {
+        index.catch_up(&src).unwrap();
+    }
+    let sessions = |q: &Query| -> Vec<String> {
+        let page = index.page(q).unwrap();
+        assert_eq!(page.total, Some(page.hits.len() as u64), "counted within the filters");
+        page.hits.iter().map(|h| format!("{}:{}", h.session, h.line)).collect()
+    };
+    let base = Query::new("deploy");
+    assert_eq!(sessions(&base), ["b:1", "a:2", "c:2", "a:1"]);
+
+    let mut q = base.clone();
+    q.exclude = vec!["flaky".into(), "DOCS".into()];
+    assert_eq!(sessions(&q), ["c:2", "a:1"], "-word drops a doc holding it, any case");
+
+    let mut q = base.clone();
+    q.before_ms = parse::parse_rfc3339_ms("2026-11-18T09:00:00Z");
+    assert_eq!(sessions(&q), ["c:2", "a:1"], "before: leaves its own start out");
+    q.since_ms = parse::parse_rfc3339_ms("2026-11-18T00:00:00Z");
+    assert_eq!(sessions(&q), ["c:2"]);
+
+    let mut q = base.clone();
+    q.harness = Some(Harness::Codex);
+    assert_eq!(sessions(&q), ["c:2"]);
+    q.harness = Some(Harness::Claude);
+    assert_eq!(sessions(&q), ["b:1", "a:2", "a:1"]);
+
+    let mut q = base;
+    q.folder = Some("CMUX".into());
+    assert_eq!(sessions(&q), ["a:2", "c:2", "a:1"], "the folder holds it, any case");
+    q.folder = Some("website".into());
+    assert_eq!(sessions(&q), ["b:1"]);
+    q.sessions = Some(vec!["a".into()]);
+    assert!(index.page(&q).unwrap().hits.is_empty(), "a session outside the folder");
+    q.folder = Some("nowhere".into());
+    q.sessions = None;
+    assert_eq!(index.page(&q).unwrap(), crate::Page { hits: Vec::new(), total: Some(0) });
+
+    // A phrase is a term with its spaces.
+    let mut q = Query::new("the parser");
+    q.also = vec!["deploy".into()];
+    assert_eq!(sessions(&q), ["b:1", "a:1"]);
+
+    // Case-sensitive: the LIKE narrows, the exact text decides, the snippet is the exact match.
+    let mut q = Query::new("Parser");
+    q.case_sensitive = true;
+    let hits = index.search(&q).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(&hits[0].snippet[hits[0].match_start..][..hits[0].match_len], "Parser");
+    q.exclude = vec!["Deploy".into()];
+    assert!(index.search(&q).unwrap().is_empty());
+    let mut q = Query::new("parser");
+    q.case_sensitive = true;
+    q.exclude = vec!["Deploy".into()];
+    assert_eq!(sessions(&q), ["b:1"], "case-sensitive exclusion leaves the lowercase one");
+
+    // The chats page's search takes the same filters.
+    let mut q = Query::new("deploy");
+    q.folder = Some("cmux".into());
+    q.exclude = vec!["flaky".into()];
+    let found = index.chats_matching(&q, 1000, 40).unwrap();
+    let got: Vec<_> = found.iter().map(|(h, n)| (h.session.as_str(), h.line, *n)).collect();
+    assert_eq!(got, [("c", 2, 1), ("a", 1, 1)]);
+    q.role = Some(Role::Assistant);
+    q.exclude.clear();
+    let found = index.chats_matching(&q, 1000, 40).unwrap();
+    assert_eq!(found.iter().map(|(h, _)| h.line).collect::<Vec<_>>(), [2]);
+}
+
+#[test]
+fn a_transcripts_working_directory_comes_from_its_lines() {
+    let mut state = LineState::default();
+    let claude = claude_said("user", "hi", "2026-11-18T09:00:00Z", "/repo");
+    assert_eq!(
+        parse::line(Harness::Claude, claude.as_bytes(), &mut state).cwd.as_deref(),
+        Some("/repo")
+    );
+    let meta =
+        json!({"type": "session_meta", "payload": {"id": "x", "cwd": "/codex/repo"}}).to_string();
+    let got = parse::line(Harness::Codex, meta.as_bytes(), &mut state);
+    assert_eq!(got.cwd.as_deref(), Some("/codex/repo"));
+    assert!(got.docs.is_empty());
+    let item = json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "x"}]}})
+    .to_string();
+    assert_eq!(parse::line(Harness::Codex, item.as_bytes(), &mut state).cwd, None);
+}
+
+/// The query language end to end: parsed, applied, searched.
+#[test]
+fn a_parsed_query_searches_as_it_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("p.jsonl");
+    append(
+        &path,
+        &[
+            claude_said("user", "the four agent pages, please", "2026-11-18T09:00:00Z", "/r/cmux"),
+            claude_said("assistant", "four pages for the agent", "2026-11-18T09:00:05Z", "/r/cmux"),
+        ],
+    );
+    let index = Index::in_memory().unwrap();
+    index.catch_up(&source(&path, "p")).unwrap();
+    let clock = crate::Clock {
+        now_ms: parse::parse_rfc3339_ms("2026-11-18T12:00:00Z").unwrap(),
+        tz_offset_min: 0,
+    };
+    let run = |text: &str| -> Vec<u64> {
+        let mut q = Query::new("");
+        crate::parse(text, clock).apply(&mut q);
+        index.search(&q).unwrap().iter().map(|h| h.line).collect()
+    };
+    assert_eq!(run("four agent"), [2, 1]);
+    assert_eq!(run("\"four agent\""), [1]);
+    assert_eq!(run("four -please"), [2]);
+    assert_eq!(run("four from:me"), [1]);
+    assert_eq!(run("four agent:codex"), Vec::<u64>::new());
+    assert_eq!(run("four repo:CMUX since:today"), [2, 1]);
+    assert_eq!(run("four before:today"), Vec::<u64>::new());
+}
