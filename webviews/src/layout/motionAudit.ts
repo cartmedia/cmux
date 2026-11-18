@@ -94,7 +94,7 @@ export function startMotionAudit(win: Window, record: (move: UndeclaredMove) => 
     handle = win.requestAnimationFrame(tick);
   };
 
-  const mutations = new win.MutationObserver(arm);
+  const mutations = new MutationObserver(arm);
   mutations.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
   const onResize = () => {
     act("resize");
@@ -105,7 +105,7 @@ export function startMotionAudit(win: Window, record: (move: UndeclaredMove) => 
     arm();
   };
   const onPress = (event: Event) => {
-    const target = event.target instanceof win.Element ? event.target : undefined;
+    const target = event.target instanceof Element ? event.target : undefined;
     if (target) act("expand", [target]);
     act("menu");
     act("composer-growth");
@@ -124,9 +124,10 @@ export function startMotionAudit(win: Window, record: (move: UndeclaredMove) => 
   doc.addEventListener("visibilitychange", onVisible);
   let shifts: PerformanceObserver | undefined;
   try {
-    if (win.PerformanceObserver?.supportedEntryTypes?.includes("layout-shift")) {
-      shifts = new win.PerformanceObserver(arm);
-      shifts.observe({ type: "layout-shift", buffered: false });
+    if (typeof PerformanceObserver !== "undefined" && PerformanceObserver.supportedEntryTypes?.includes("layout-shift")) {
+      const observer = new PerformanceObserver(arm);
+      observer.observe({ type: "layout-shift", buffered: false });
+      shifts = observer;
     }
   } catch {
     shifts = undefined;
