@@ -179,8 +179,13 @@ final class PaletteKeywordHintView: NSView {
     nonisolated override var isFlipped: Bool { true }
 
     func update(title: String?) {
-        isHidden = title == nil
-        let text = title.map(PaletteStrings.keywordHint) ?? ""
+        update(text: title.map(PaletteStrings.keywordHint))
+    }
+
+    /// Shows `text` as is before the Tab keycap (a query completion: "from:me ⇥"); nil hides it.
+    func update(text: String?) {
+        isHidden = text == nil
+        let text = text ?? ""
         label.stringValue = text
         setAccessibilityLabel(text)
         needsLayout = true

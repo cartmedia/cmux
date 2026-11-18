@@ -26,6 +26,10 @@ public struct AgentChatsPalettePage {
     private let windows: AcpmuxChatWindows?
     private let history: @MainActor (String) async -> String?
     private let open: @MainActor (String, String?) -> Void
+    private let focusedChat: @MainActor () -> AgentChatsFocusedChat?
+    private let syntax: (@MainActor (String, Int) async -> AcpmuxSearchSyntaxAnswer?)?
+    private let scopeMemory: AgentChatsScopeMemory
+    private let now: @MainActor () -> Date
 
     /// - Parameters:
     ///   - windows: The chat feed's windows over acpmux's index; nil without a local acpmux.
@@ -34,32 +38,57 @@ public struct AgentChatsPalettePage {
     ///     encoded off the main thread (`FrecencyStore.encodedRankerHistory`), never in a key's turn.
     ///   - open: Opens a chat by key (the app's Open Chat path), scrolled to a message when the
     ///     second value names one (an agent page's `revealTurn` value).
+    ///   - focusedChat: The chat the window shows in front, read when the page opens: This chat searches
+    ///     it. Nil (no chat in front) hides This chat.
+    ///   - syntax: acpmux's `_acpmux/search_syntax` (query, cursor): the field's operator completions; nil: none.
+    ///   - scopeMemory: Where the last scope picked is kept.
     public init(windows: AcpmuxChatWindows?, history: @escaping @MainActor (String) async -> String?,
-                open: @escaping @MainActor (String, String?) -> Void) {
+                open: @escaping @MainActor (String, String?) -> Void,
+                focusedChat: @escaping @MainActor () -> AgentChatsFocusedChat? = { nil },
+                syntax: (@MainActor (String, Int) async -> AcpmuxSearchSyntaxAnswer?)? = nil,
+                scopeMemory: AgentChatsScopeMemory = AgentChatsScopeMemory(),
+                now: @escaping @MainActor () -> Date = { Date() }) {
         self.windows = windows
         self.history = history
         self.open = open
+        self.focusedChat = focusedChat
+        self.syntax = syntax
+        self.scopeMemory = scopeMemory
+        self.now = now
     }
 
     /// The page, starting with `initialQuery` typed (the more row of Search opens it with Search's query).
+    /// Its scope switch (This chat · Recent · All) starts on the last scope picked, Recent the first time.
     public func page(initialQuery: String = "") -> PalettePageSpec {
         let counts = PastPageCounts()
+        let state = ScopeState(scope: scopeMemory.scope, focused: focusedChat(), memory: scopeMemory)
         var spec = PalettePageSpec(id: "agentChats", title: AgentChatsPaletteStrings.title, placeholder: AgentChatsPaletteStrings.placeholder,
                                    symbol: "bubble.left.and.bubble.right", providers: [], initialQuery: initialQuery,
                                    onCancel: { [windows] in windows?.close(Self.window) },
-                                   queryResults: { [windows, history, open, counts] query in
-                                       Self.answers(query, windows: windows, history: history, counts: counts, open: open)
+                                   queryResults: { [windows, history, open, counts, state, syntax, now] query in
+                                       state.asked(query, syntax: syntax)
+                                       if state.scope == .thisChat, let focused = state.focused {
+                                           return Self.chatAnswers(query, in: focused, state: state)
+                                       }
+                                       let since = state.scope == .all ? nil : Self.recentStart(now())
+                                       return Self.answers(query, windows: windows, history: history, counts: counts,
+                                                           sinceMs: since, onParsed: { [weak state] in state?.show(parsed: $0, query: query) },
+                                                           open: open)
                                    },
                                    filtersByQuery: false)
+        spec.live = state.live
+        state.showFilters()
         // Search cuts the chats to its share: this row says how many more match (the cut rows and those past the
         // answer's page, as the answer counted them) and opens this page with the query.
         spec.moreRow = { [self, counts] notShown, query in
             Self.moreInSearch(hidden: notShown + counts.pastPage(query), page: self.page(initialQuery: query))
         }
         // acpmux connected, or its index came ready: the shown query is asked again.
-        spec.onSourceChange = { [windows] changed in
+        // A scope picked: the shown query is asked again in it too.
+        spec.onSourceChange = { [windows, state] changed in
             let token = FollowToken()
             windows?.followAvailability(token) { changed() }
+            state.reask.append(changed)
             return token
         }
         return spec
@@ -83,7 +112,9 @@ public struct AgentChatsPalettePage {
     ///     ranks a chat chosen before as the palette did; nil: none.
     ///   - open: Opens a chat by key (the app's Open Chat path).
     static func answers(_ query: String, windows: AcpmuxChatWindows?, history: @escaping @MainActor (String) async -> String?,
-                        counts: PastPageCounts? = nil, open: @escaping @MainActor (String, String?) -> Void) -> AsyncStream<[PaletteItem]> {
+                        counts: PastPageCounts? = nil, sinceMs: Int64? = nil,
+                        onParsed: (@MainActor (AcpmuxSearchParsed?) -> Void)? = nil,
+                        open: @escaping @MainActor (String, String?) -> Void) -> AsyncStream<[PaletteItem]> {
         // The choice history is encoded off the main thread first; a query the palette moved past by
         // then (its stream ended) opens no window, so an older spec never replaces a newer one.
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -91,14 +122,19 @@ public struct AgentChatsPalettePage {
         let task = Task { @MainActor in
             let encoded = text.isEmpty || windows == nil ? nil : await history(query)
             guard !Task.isCancelled else { return continuation.finish() }
-            for await rows in answers(query, windows: windows, history: encoded, counts: counts, open: open) { continuation.yield(rows) }
+            for await rows in answers(query, windows: windows, history: encoded, counts: counts, sinceMs: sinceMs,
+                                      onParsed: onParsed, open: open) { continuation.yield(rows) }
             continuation.finish()
         }
         continuation.onTermination = { _ in task.cancel() }
         return stream
     }
 
+    /// - Parameters:
+    ///   - sinceMs: Only chats updated since then (the Recent scope); nil: every chat.
+    ///   - onParsed: Called with what acpmux read in the query (`parsed`) with each answer.
     static func answers(_ query: String, windows: AcpmuxChatWindows?, history: String? = nil, counts: PastPageCounts? = nil,
+                        sinceMs: Int64? = nil, onParsed: (@MainActor (AcpmuxSearchParsed?) -> Void)? = nil,
                         open: @escaping @MainActor (String, String?) -> Void) -> AsyncStream<[PaletteItem]> {
         let (stream, continuation) = AsyncStream.makeStream(of: [PaletteItem].self, bufferingPolicy: .bufferingNewest(1))
         guard let windows else {
@@ -109,10 +145,11 @@ public struct AgentChatsPalettePage {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let spec = AcpmuxChatWindows.Spec(window: window, limit: pageLimit, topLevel: true, query: text.isEmpty ? nil : text,
                                           untitled: AgentChatsPaletteStrings.untitled, history: text.isEmpty ? nil : history,
-                                          count: true, content: true)
+                                          count: true, content: true, sinceMs: sinceMs)
         // The follower lives as long as this query's stream: ending it releases the token.
         let token = FollowToken()
         let answer = { (rows: [AcpmuxChat]) in
+            onParsed?(windows.window(window).parsed)
             var shown = items(rows, query: text, windows: windows, open: open)
             // More chats than one page holds: say so, and how to reach the rest (R-L5: a limit
             // that leaves chats out shows it).

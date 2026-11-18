@@ -30,6 +30,8 @@ final class PaletteContentView: NSView {
     private let emptyTitle = PaletteText.label(Typography.bodyEmphasized, tone: .secondary)
     /// The page's line under the field (`PaletteModel.fieldHint`).
     private let fieldHint = PaletteText.label(Typography.caption, tone: .tertiary)
+    /// The page's filter switch (`PalettePageLive.filters`), under the field.
+    private let filterSwitch = PaletteFilterSwitchView()
     private let footer = PaletteFooterView()
     let actionsMenuView = PaletteActionsMenuView()
     private let recorderView = PaletteShortcutRecorderView()
@@ -59,7 +61,8 @@ final class PaletteContentView: NSView {
         emptyTitle.alignment = .center
         [topRule, bottomRule].forEach { $0.wantsLayer = true }
         fieldHint.isHidden = true
-        [searchBar, fieldHint, topRule, listHost, emptyTitle, bottomRule, footer].forEach(body.addSubview)
+        filterSwitch.isHidden = true
+        [searchBar, filterSwitch, fieldHint, topRule, listHost, emptyTitle, bottomRule, footer].forEach(body.addSubview)
         stage.addSubview(glass)
         stage.addSubview(actionsMenuView)
         stage.addSubview(recorderView)
@@ -101,6 +104,7 @@ final class PaletteContentView: NSView {
         searchBar.onPopTo = { model.pop(to: $0) }
         searchBar.onKeywordHint = { model.handle(.openActions) }
         searchBar.onRemoveToken = { model.removeToken(at: $0) }
+        filterSwitch.onSelect = { id in model.pageLive?.filters?.select(id) }
         list.onHover = { model.hover($0) }
         list.onPointerMove = { model.pointerMoved(over: $0) }
         list.onActivate = { model.activate(rowID: $0) }
@@ -135,6 +139,9 @@ final class PaletteContentView: NSView {
         let recorderState = model.shortcutRecorder
         let size = PaletteLayout.windowSize
         let textSizes = PaletteLayout.textSizes
+        // The page's live chrome (`PalettePageLive`): read here, so its changes render too.
+        let live = model.pageLive
+        _ = (live?.tokens.count, live?.hint, live?.filters?.selected, live?.completion?.label)
 
         if resultsVersion != appliedResults {
             appliedResults = resultsVersion
@@ -166,8 +173,12 @@ final class PaletteContentView: NSView {
             style: model.chipStyle,
             keywordHint: model.keywordHint?.title,
             isLoading: model.isLoading,
-            tokens: model.pageTokens
+            tokens: model.shownTokens,
+            completion: live?.completion?.label
         )
+        let hadSwitch = !filterSwitch.isHidden
+        filterSwitch.update(live?.filters)
+        if hadSwitch != !filterSwitch.isHidden { needsLayout = true }
         footer.update(
             pageTitle: model.prefixHints ?? model.pageTitle,
             pageSymbol: model.pageSymbol,
@@ -176,9 +187,10 @@ final class PaletteContentView: NSView {
             closeTitle: model.selectedItem.flatMap { $0.isEnabled ? $0.closeCommand?.title : nil },
             crumbs: model.pageCrumbs
         )
-        if fieldHint.stringValue != model.fieldHint ?? "" || fieldHint.isHidden != (model.fieldHint == nil) {
-            fieldHint.stringValue = model.fieldHint ?? ""
-            fieldHint.isHidden = model.fieldHint == nil
+        let hint = live?.hint ?? model.fieldHint
+        if fieldHint.stringValue != hint ?? "" || fieldHint.isHidden != (hint == nil) {
+            fieldHint.stringValue = hint ?? ""
+            fieldHint.isHidden = hint == nil
             needsLayout = true
         }
         if pageToken != appliedPage {
@@ -241,11 +253,15 @@ final class PaletteContentView: NSView {
         var y: CGFloat = 0
         searchBar.frame = NSRect(x: 0, y: y, width: width, height: PaletteLayout.searchHeight)
         y += PaletteLayout.searchHeight
-        // The hint takes its line from the top of the list.
-        let fieldHintHeight = fieldHint.isHidden ? 0 : PaletteText.height(fieldHint) + Metrics.space2
+        // The filter switch and the hint take their lines from the top of the list.
+        let switchHeight = filterSwitch.isHidden ? 0 : PaletteFilterSwitchView.height
+        filterSwitch.frame = NSRect(x: 0, y: y, width: width, height: switchHeight)
+        y += switchHeight
+        let hintLineHeight = fieldHint.isHidden ? 0 : PaletteText.height(fieldHint) + Metrics.space2
         fieldHint.frame = body.pixelAligned(NSRect(x: PaletteLayout.horizontalPadding, y: y,
-                                                   width: width - 2 * PaletteLayout.horizontalPadding, height: fieldHintHeight))
-        y += fieldHintHeight
+                                                   width: width - 2 * PaletteLayout.horizontalPadding, height: hintLineHeight))
+        y += hintLineHeight
+        let fieldHintHeight = hintLineHeight + switchHeight
         topRule.frame = NSRect(x: 0, y: y, width: width, height: Metrics.dividerThickness)
         y += Metrics.dividerThickness
         let listFrame = NSRect(x: 0, y: y, width: width, height: PaletteLayout.listHeight - fieldHintHeight)

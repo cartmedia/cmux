@@ -66,7 +66,8 @@ final class PaletteSearchBar: NSView, NSTextFieldDelegate {
     /// `chips` are the levels above the root; `rootTitle` names the root
     /// in the breadcrumb.
     func update(query: String, placeholder: String, chips scopeChips: [PaletteScopeChip], rootTitle: String,
-                style: PaletteScopeChipStyle, keywordHint hint: String?, isLoading: Bool, tokens chosen: [PaletteToken] = []) {
+                style: PaletteScopeChipStyle, keywordHint hint: String?, isLoading: Bool, tokens chosen: [PaletteToken] = [],
+                completion: String? = nil) {
         tokens.update(tokens: chosen)
         if field.stringValue != query {
             field.stringValue = query
@@ -87,7 +88,8 @@ final class PaletteSearchBar: NSView, NSTextFieldDelegate {
         breadcrumb.isHidden = style != .breadcrumb || scopeChips.isEmpty
         breadcrumbLabel.stringValue = ([rootTitle] + scopeChips.map(\.title)).joined(separator: " › ")
         breadcrumb.themedToolTip = scopeChips.dropLast().last.map { PaletteStrings.backTo($0.title) } ?? PaletteStrings.backTo(rootTitle)
-        keywordHint.update(title: hint)
+        // A scope keyword's hint wins; else a query completion Tab takes (a search operator).
+        if let hint { keywordHint.update(title: hint) } else { keywordHint.update(text: completion) }
         let name = scopeChips.last.map { PaletteStrings.keywordHint($0.title) } ?? placeholder
         field.setAccessibilityLabel(name)
         field.cell?.setAccessibilityLabel(name)

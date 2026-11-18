@@ -82,6 +82,17 @@ public struct PaletteKeyMap {
             && event.charactersIgnoringModifiers?.lowercased() == "k"
     }
 
+    /// Cmd-[ (-1) or Cmd-] (+1): a page's filter switch moves (`PalettePageLive.filters`, as Cursor's
+    /// search moves its filters); nil for any other key.
+    public static func filterStep(_ event: NSEvent) -> Int? {
+        guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command else { return nil }
+        switch event.charactersIgnoringModifiers {
+        case "[": return -1
+        case "]": return 1
+        default: return nil
+        }
+    }
+
     public static func isCloseItem(_ event: NSEvent) -> Bool {
         event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command
             && event.charactersIgnoringModifiers?.lowercased() == "w"

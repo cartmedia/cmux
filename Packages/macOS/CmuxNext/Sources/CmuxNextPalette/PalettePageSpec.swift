@@ -95,6 +95,9 @@ public struct PalettePageSpec {
     public var initialQuerySelection: Int?
     /// Values chosen so far on a multi-value step, drawn as chips before the query.
     public var tokens: [PaletteToken] = []
+    /// What the page changes around the field as it answers (chips of its query, the hint, a filter
+    /// switch, a Tab completion); drawn in place of `tokens` and `hint` while it has them. Nil: none.
+    public var live: PalettePageLive?
 
     public init(
         id: String,

@@ -54,9 +54,43 @@ extension PaletteModel {
     }
 
     /// A click on chip `index` of a multi-value step: the page without that value.
+    /// A chip of the query (`PalettePageLive.tokens`) takes its part out of the query instead.
     public func removeToken(at index: Int) {
-        guard let current, case .list(let page) = current.kind, page.tokens.indices.contains(index) else { return }
+        guard let current, case .list(let page) = current.kind else { return }
+        if let live = page.live, !live.tokens.isEmpty {
+            guard live.tokens.indices.contains(index), let edit = live.tokens[index].editsQuery else { return }
+            query = edit(query)
+            return
+        }
+        guard page.tokens.indices.contains(index) else { return }
         replaceCurrentPage(with: page.tokens[index].remove())
+    }
+
+    /// The chips the field shows: the page's live ones while it has any, else its chosen values.
+    var shownTokens: [PaletteToken] {
+        guard let current, case .list(let page) = current.kind else { return pageTokens }
+        if let live = page.live, !live.tokens.isEmpty { return live.tokens }
+        return pageTokens
+    }
+
+    /// The current page's live chrome (`PalettePageSpec.live`).
+    public var pageLive: PalettePageLive? {
+        guard let current, case .list(let page) = current.kind else { return nil }
+        return page.live
+    }
+
+    /// Tab with a completion of the query on offer: takes it. False with none.
+    func acceptCompletion() -> Bool {
+        guard let completion = pageLive?.completion else { return false }
+        query = completion.apply(query)
+        return true
+    }
+
+    /// Cmd-[ (`step` -1) or Cmd-] (+1): the page's filter switch moves to its neighbour. False with no switch.
+    public func stepFilter(_ step: Int) -> Bool {
+        guard let filters = pageLive?.filters, let next = filters.option(stepping: step) else { return false }
+        if next.id != filters.selected { filters.select(next.id) }
+        return true
     }
 
     /// Backspace on an empty query of a multi-value step: takes out the last chip. False with none.

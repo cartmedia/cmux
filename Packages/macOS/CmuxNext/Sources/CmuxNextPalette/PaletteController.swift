@@ -414,6 +414,7 @@ public final class PaletteController {
         panel.capturesKeyEquivalent = { [weak self] event in
             guard let model = self?.model else { return false }
             if PaletteKeyMap.isActionsKey(event) { return model.selectedItem != nil || model.actionsMenu != nil }
+            if PaletteKeyMap.filterStep(event) != nil { return model.pageLive?.filters != nil }
             guard PaletteKeyMap.isCloseItem(event) else { return false }
             return model.currentPageOwnsCloseKey || model.selectedItem?.closeCommand != nil
         }
@@ -455,6 +456,7 @@ public final class PaletteController {
             return shortcutRecorder.handle(PaletteShortcutRecorder.shortcut(for: event), keyCode: event.keyCode, event: event)
         }
         if Self.inputMethodOwns(event, in: window) { return false }
+        if model.actionsMenu == nil, let step = PaletteKeyMap.filterStep(event), model.stepFilter(step) { return true }
         let caret = Self.caret(in: window)
         guard let command = PaletteKeyMap.command(
             for: event,

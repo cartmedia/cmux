@@ -40,11 +40,15 @@ public final class AcpmuxChatWindows {
         /// A query also finds chats by what was said in them, after those its ranker found: each
         /// such row carries ``AcpmuxChat/said``.
         public var content: Bool
+        /// Only chats updated at or after this time (ms since the epoch), and only what was said then: the
+        /// chats page's Recent scope. A query's `since:` narrows it further (the later start wins).
+        public var sinceMs: Int64?
 
         public init(window: String, limit: Int, topLevel: Bool = true, exclude: [String] = [], keys: [String]? = nil,
                     query: String? = nil, untitled: String? = nil, history: String? = nil, count: Bool = false,
-                    content: Bool = false) {
+                    content: Bool = false, sinceMs: Int64? = nil) {
             self.content = content
+            self.sinceMs = sinceMs
             self.untitled = untitled
             self.history = history
             self.count = count
@@ -69,6 +73,9 @@ public final class AcpmuxChatWindows {
             if let history { params["history"] = history }
             if count { params["count"] = true }
             if content { params["content"] = true }
+            if let sinceMs { params["sinceMs"] = sinceMs }
+            // `since:today` is the person's local day.
+            if let query, !query.isEmpty { params["tzOffsetMinutes"] = acpmuxTimeZoneOffsetMinutes() }
             return params
         }
     }
@@ -90,6 +97,9 @@ public final class AcpmuxChatWindows {
         /// (no connection, or an index still starting after a relaunch), not because there are no chats; a list
         /// reads it to show loading instead of nothing. It stays true across a reconnect, which keeps the rows.
         public private(set) var hasAnswered = false
+        /// What acpmux read in a query window's query (its operators as chips, `parsed`); nil for a window
+        /// with no query, or from a daemon that sends none.
+        public private(set) var parsed: AcpmuxSearchParsed?
         /// The revision of the last message applied; 0 before the first.
         @ObservationIgnored public fileprivate(set) var revision: UInt64 = 0
         /// Called with the rows after each message of this window acpmux sends for its current spec
@@ -125,6 +135,10 @@ public final class AcpmuxChatWindows {
             if self.rows != rows { self.rows = rows }
         }
 
+        fileprivate func set(parsed: AcpmuxSearchParsed?) {
+            if self.parsed != parsed { self.parsed = parsed }
+        }
+
         fileprivate func answered() {
             if !hasAnswered { hasAnswered = true }
             guard !followers.isEmpty else { return }
@@ -148,6 +162,8 @@ public final class AcpmuxChatWindows {
         public var hasMore: Bool
         /// More chats may match as acpmux reads them (``Window/filling``).
         public var filling = false
+        /// What acpmux read in the spec's query (``Window/parsed``). A diff without one keeps the window's.
+        public var parsed: AcpmuxSearchParsed?
         /// The revision a diff applies on: the one before it, or the first of a drain's diffs merged into it.
         var follows: UInt64
 
@@ -174,6 +190,7 @@ public final class AcpmuxChatWindows {
             total = next.total
             hasMore = next.hasMore
             filling = next.filling
+            if let parsed = next.parsed { self.parsed = parsed }
             rows.merge(next.rows) { $1 }
             return true
         }
@@ -186,6 +203,7 @@ public final class AcpmuxChatWindows {
                       full: params["full"] as? Bool ?? false, keys: keys, rows: rows, hasMore: params["hasMore"] as? Bool ?? false)
             total = (params["total"] as? NSNumber)?.intValue
             filling = params["filling"] as? Bool ?? false
+            parsed = AcpmuxSearchParsed(json: params["parsed"])
         }
     }
 
@@ -238,6 +256,7 @@ public final class AcpmuxChatWindows {
         failed.remove(id)
         notReady.remove(id)
         models[id]?.set(rows: [])
+        models[id]?.set(parsed: nil)
         send?("_acpmux/chats_window_close", ["window": id, "gen": generations[id] ?? 0])
     }
 
@@ -354,6 +373,8 @@ public final class AcpmuxChatWindows {
         model.revision = update.revision
         lastTouchedRows = update.rows.count
         model.set(rows: rows, total: update.total, hasMore: update.hasMore, filling: update.filling)
+        // A full message is the spec's whole answer: no `parsed` in it means none. A diff keeps the last.
+        if update.full || update.parsed != nil { model.set(parsed: update.parsed) }
         answeredGeneration[update.window] = generations[update.window]
         model.answered()
         // The index that was not ready filled this window: a reader that ended on `ready: false` asks again.

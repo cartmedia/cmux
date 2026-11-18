@@ -43,8 +43,10 @@ extension PaletteModel {
             if let id = selectedItem?.actionID, onEditShortcut?(id) == true { return true }
             _ = openActionsMenu()
         case .openActions:
-            // Tab: a tree page enters the selected row; a keyword, a scope
+            // Tab: a completion of the query on offer takes it (a search
+            // operator); a tree page enters the selected row; a keyword, a scope
             // row or a drill enters a scope; otherwise the Actions menu opens.
+            if acceptCompletion() { return true }
             if enterSelectedRow() { return true }
             send(.tab)
         case .closeActions:
