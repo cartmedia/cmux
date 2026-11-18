@@ -218,6 +218,30 @@ export default agentPaneEntry({
       native,
       play: showSessionInfo,
     },
+    "look-studio": {
+      note: "SCRATCH: the chat with Studio's cmux-setup.json chat settings.",
+      snapshot: transcript,
+      native,
+      display: {
+        "agentPane.display.font.ui": "inter",
+        "agentPane.display.font.size": 13,
+        "agentPane.display.font.lineHeight": 1.55,
+        "agentPane.display.code.scale": 0.9,
+        "agentPane.display.width": 760,
+        "agentPane.display.harnessPlacement": "compact",
+      },
+    },
+    "look-paper": {
+      note: "SCRATCH: the chat with Paper's cmux-setup.json chat settings.",
+      snapshot: transcript,
+      native,
+      display: {
+        "agentPane.display.font.preset": "serif",
+        "agentPane.display.font.size": 15,
+        "agentPane.display.font.lineHeight": 1.7,
+        "agentPane.display.width": 720,
+      },
+    },
     "composer-model-picker": {
       note: "Play: click the composer's model button; its menu lists the harness's models, Effort, More models and Fast mode.",
       snapshot: transcript,
