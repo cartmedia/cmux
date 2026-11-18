@@ -89,7 +89,7 @@ impl InboxCache {
             }
             CloudEvent::InboxReset { .. } => self.forget(),
             CloudEvent::InboxChanged { entries, account, .. } => {
-                self.write(account.as_deref(), entries)
+                self.write(account.as_deref(), entries);
             }
             _ => {}
         }
