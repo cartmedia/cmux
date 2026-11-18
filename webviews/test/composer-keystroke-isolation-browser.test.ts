@@ -193,9 +193,17 @@ await requireBrowserLane("composer-keystroke-isolation-browser.test.ts", async (
     )) as Commit[];
   }
 
+  /// Components that render on their own clock, never a key's: a message's age (MessageTime,
+  /// clock.ts `useLabelClock`) turns over at the minute for every label in view, in one commit with
+  /// none of their parents. A commit made of those alone is the clock's, wherever the window falls
+  /// (2026-11-18: a scrolled-up growth window crossed a minute and drew 31 MessageTime). A key that
+  /// rendered a label would render its row with it, and still counts.
+  const CLOCK_ONLY = new Set(["MessageTime"]);
+  const byKey = (commit: Commit) => commit.outside.length > 0 && !commit.outside.every((name) => CLOCK_ONLY.has(name));
   const outsideOf = (commits: Commit[]) => {
     const counts = new Map<string, number>();
-    for (const commit of commits) for (const name of commit.outside) counts.set(name, (counts.get(name) ?? 0) + 1);
+    for (const commit of commits)
+      if (byKey(commit)) for (const name of commit.outside) counts.set(name, (counts.get(name) ?? 0) + 1);
     return Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1]));
   };
 
@@ -350,7 +358,8 @@ await requireBrowserLane("composer-keystroke-isolation-browser.test.ts", async (
         gap_before: Math.round(gapBefore * 10) / 10,
         gap_after: Math.round(gapAfter * 10) / 10,
         commits: commits.length,
-        commits_outside: commits.filter((commit) => commit.outside.length > 0).length,
+        commits_outside: commits.filter(byKey).length,
+        clock_commits: commits.filter((commit) => commit.outside.length > 0 && !byKey(commit)).length,
         outside: outsideOf(commits),
         layout,
       };
