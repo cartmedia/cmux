@@ -251,7 +251,7 @@ frames_main() {
     account_home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
     (cd cmux-tui && PATH="${account_home:+$account_home/.cargo/bin:}$PATH" cargo build --release --quiet -p acpmux --example scale_home) >"$tmp/seeder.log" 2>&1 \
       || { echo "TSW the scale seeder did not build"; tail -n 30 "$tmp/seeder.log"; exit 3; }
-    cp "cmux-tui/target/release/examples/scale_home" "$tmp/scale_home" && chmod 0755 "$tmp/scale_home"
+    cp "${CARGO_TARGET_DIR:-$root/cmux-tui/target}/release/examples/scale_home" "$tmp/scale_home" && chmod 0755 "$tmp/scale_home"
   fi
   app_under_test "$build" "$config" "$dmg" "$tmp" "$root" tabswitch TSW || exit 3
   local app_args=("${APP_ARGS[@]}") label="$APP_LABEL"
