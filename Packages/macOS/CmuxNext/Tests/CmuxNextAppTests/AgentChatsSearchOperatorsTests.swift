@@ -256,7 +256,8 @@ import Testing
         #expect(state.live.tokens.first?.editsQuery?("parser from:me") == "parser")
         var empty: [[PaletteItem]] = []
         for await rows in AgentChatsPalettePage.chatAnswers("  ", in: chat, state: state) { empty.append(rows) }
-        #expect(empty.allSatisfy(\.isEmpty), "an empty query asks nothing")
+        let listedRows = empty.contains { !$0.isEmpty }
+        #expect(!listedRows, "an empty query asks nothing")
         #expect(asked.count == 1)
     }
 }
