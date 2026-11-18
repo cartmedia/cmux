@@ -2235,15 +2235,68 @@ function TranscriptView({
   // The shared animation owns one RAF and its input listeners. Leaving this chat or unmounting
   // cancels that ride before the next session can reuse this scroller.
   useLayoutEffect(() => stopJump, [sessionId, stopJump]);
+  /// The bottom stack's sizes (the observer below measures them) live in refs, not state: a composer
+  /// line that only grows the card while the rows lift with it (or the view is scrolled up) is written
+  /// to the view directly and renders nothing (`growInPlace`; Leo, 2026-11-17: "why should typing even
+  /// cause rendering!?!?"). Every other change asks for a render (`redrawDock`), which reads them.
+  const [, redrawDock] = useReducer((count: number) => count + 1, 0);
+  const dockSpaceRef = useRef(0);
+  const dockHeightRef = useRef(0);
+  const dockCardRef = useRef(0);
+  const dockTrayRef = useRef(0);
+  /// The stack as the observer last measured it (it writes all five), for the handlers below.
+  const dockNoticeRef = useRef(0);
+  const setDock = useCallback(
+    (next: { space: number; height: number; card: number; tray: number; notice: number }) => {
+      dockSpaceRef.current = next.space;
+      dockHeightRef.current = next.height;
+      dockCardRef.current = next.card;
+      dockTrayRef.current = next.tray;
+      dockNoticeRef.current = next.notice;
+      redrawDock();
+    },
+    [],
+  );
+  /// The observer's card-only path (`take`): each pass's follow effect sets it for what that pass
+  /// drew. It takes a new stack size when nothing but the card's height moved and the pass's room
+  /// and lift follow that alone (the rows lifted exactly by the card's growth, or the view scrolled
+  /// up), writes what a render would (`drawDock`, and the refs the follow effect writes), and
+  /// answers true; else false, and the observer renders.
+  const growInPlace = useRef<(space: number, height: number, card: number) => boolean>(() => false);
+  /// A size `growInPlace` wrote since the last commit: the next commit writes the view's dock again,
+  /// since React writes a style only when its own last value differs.
+  const dockDrawn = useRef(false);
+  /// The view's parts that draw the stack's sizes, from the refs: the rows' lift, and the stack's
+  /// reach (`--acpmux-dock-space`) on the scroller (its masks, scroll padding, the view's foot) and on
+  /// the pills over it (Jump up, Jump to latest, Needs you), as the render writes them.
+  const drawDock = useCallback(() => {
+    const view = ref.current;
+    const rows = thread.current;
+    if (rows) rows.style.top = `${liftRef.current + topInsetRef.current}px`;
+    if (!view) return;
+    const space = dockSpaceRef.current;
+    const reach = `${space}px`;
+    if (space > 0) view.style.setProperty("--acpmux-dock-space", reach);
+    else view.style.removeProperty("--acpmux-dock-space");
+    for (const pill of view.parentElement?.querySelectorAll<HTMLElement>(":scope > .acpmux-jump-latest, :scope > * > .acpmux-jump-latest") ?? [])
+      if (space > 0) pill.style.setProperty("--acpmux-dock-space", reach);
+      else pill.style.removeProperty("--acpmux-dock-space");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs only
+  }, []);
+  // After a commit that followed a write in place: React left any style whose own value it had not
+  // changed, so the view's dock is written again from the refs the commit drew.
+  useLayoutEffect(() => {
+    if (!dockDrawn.current) return;
+    dockDrawn.current = false;
+    drawDock();
+  });
   /// The bottom stack's height over the view's foot: room under the last row, out of the view.
-  const [dockSpace, setDockSpace] = useState(0);
+  const dockSpace = dockSpaceRef.current;
   /// The bottom stack's reach at rest, for the prompt rail's box (`railBox`): its smallest at `height`.
   const restingDock = useRef<{ height: number; sessionId?: string; dock?: HTMLElement | null; space: number }>({
     height: -1,
     space: 0,
   });
-  const dockSpaceRef = useRef(0);
-  dockSpaceRef.current = dockSpace;
   const topInsetRef = useRef(topInset);
   topInsetRef.current = topInset;
   /// The room the rows keep over a floating stack: its height, and the rest gap's share past the last
@@ -2256,27 +2309,19 @@ function TranscriptView({
   dockRoomRef.current = dockRoom;
   // Full stack height is distinct from the overlap room: a tall dock can extend beyond the
   // viewport, while an after-latest tray still needs the whole stack reserved in stage flow.
-  const [dockHeight, setDockHeight] = useState(0);
-  const dockHeightRef = useRef(0);
-  dockHeightRef.current = dockHeight;
+  const dockHeight = dockHeightRef.current;
   /// The composer card's height, in that stack: what grows a line at a time (Shift-Return, a wrap).
-  const [dockCard, setDockCard] = useState(0);
-  const dockCardRef = useRef(0);
-  dockCardRef.current = dockCard;
+  const dockCard = dockCardRef.current;
   /// The running tray's height, in that stack: what its header, View all and a command's live tail
   /// open and fold. What the reader opens or folds there the room under the last row takes only once
   /// the rows move anyway (`trayHold`).
-  const [dockTray, setDockTray] = useState(0);
-  const dockTrayRef = useRef(0);
-  dockTrayRef.current = dockTray;
+  const dockTray = dockTrayRef.current;
   /// The reader opened or folded something in the tray, and the room has not taken it yet.
   const trayToggled = useRef(false);
   /// The host's line in that stack (HostError.tsx: "Reconnecting…", or a refusal and its Retry), which
   /// comes and goes while the pane finds acpmux: the room under the last row takes it only once the
   /// rows move anyway (`noticeHold`).
-  const [dockNotice, setDockNotice] = useState(0);
-  /// The same, as the stack's observer last measured it (it writes both), for the handlers below.
-  const dockNoticeRef = useRef(0);
+  const dockNotice = dockNoticeRef.current;
   /// The host line's height the room under the last row last took (`noticeHold` below). State, not a
   /// ref read in render: the pass that changes it renders once more before the frame paints, with the
   /// same hold (the base it writes is the one that hold was made against), so nothing moves. It changes
@@ -2344,12 +2389,9 @@ function TranscriptView({
   useBesideStack(dock, ref, TRAY_GHOST);
   useLayoutEffect(() => {
     if (!dock) {
-      setDockSpace(0);
-      setDockHeight(0);
-      setDockCard(0);
-      setDockTray(0);
-      dockNoticeRef.current = 0;
-      setDockNotice(0);
+      // As state did: no render when the stack was already gone.
+      if (dockSpaceRef.current || dockHeightRef.current || dockCardRef.current || dockTrayRef.current || dockNoticeRef.current)
+        setDock({ space: 0, height: 0, card: 0, tray: 0, notice: 0 });
       return;
     }
     // Before the frame paints, as the viewport's own size is: a composer that grew a line, or a
@@ -2450,19 +2492,26 @@ function TranscriptView({
       dockNoticeRef.current = nextNotice;
       // A tray that went holds nothing: the room is the stack's again.
       if (nextTray <= 0) trayToggled.current = false;
+      const grew = next - dockSpaceRef.current;
       if (
-        Math.abs(next - dockSpaceRef.current) >= 0.5 ||
-        Math.abs(nextHeight - dockHeightRef.current) >= 0.5 ||
-        Math.abs(nextCard - dockCardRef.current) >= 0.5 ||
-        noticeChanged
+        Math.abs(grew) < 0.5 &&
+        Math.abs(nextHeight - dockHeightRef.current) < 0.5 &&
+        Math.abs(nextCard - dockCardRef.current) < 0.5 &&
+        !noticeChanged
       )
-        flushSync(() => {
-          setDockSpace(next);
-          setDockHeight(nextHeight);
-          setDockCard(nextCard);
-          setDockTray(nextTray);
-          setDockNotice(nextNotice);
-        });
+        return;
+      // The card alone grew or shrank (a line, a wrap): written to the view, no render.
+      if (
+        !noticeChanged &&
+        Math.abs(nextTray - dockTrayRef.current) < 0.5 &&
+        Math.abs(nextCard - dockCardRef.current - grew) < 0.5 &&
+        Math.abs(nextHeight - dockHeightRef.current - grew) < 0.5 &&
+        growInPlace.current(next, nextHeight, nextCard)
+      )
+        return;
+      flushSync(() =>
+        setDock({ space: next, height: nextHeight, card: nextCard, tray: nextTray, notice: nextNotice }),
+      );
     };
     const observer = new ResizeObserver(take);
     // perf-hot: one render and two layout reads per growth (not per frame) composer-field-growth
@@ -2497,13 +2546,7 @@ function TranscriptView({
     observer.observe(dock);
     noteQueue();
     const space = over();
-    const fullHeight = height();
-    setDockSpace(space);
-    setDockHeight(fullHeight);
-    setDockCard(card(space));
-    setDockTray(tray(space));
-    dockNoticeRef.current = notice(space);
-    setDockNotice(dockNoticeRef.current);
+    setDock({ space, height: height(), card: card(space), tray: tray(space), notice: notice(space) });
     return () => {
       observer.disconnect();
       dock.removeEventListener("click", toggled, { capture: true });
@@ -2511,7 +2554,7 @@ function TranscriptView({
       rowsMove?.cancel();
       freezeGrowthRise.current = () => {};
     };
-  }, [dock, noteQueue]);
+  }, [dock, noteQueue, setDock]);
   // And each time the queue changes, in the commit that draws it. A change that leaves the stack's
   // size as it was (a prompt the fold hides, or one an opened list's cap cuts off, run by another
   // client) runs neither observer: still noted as queued, the next resize took it for a card that
@@ -5224,6 +5267,51 @@ function TranscriptView({
     heldRoom.current = room + lifted + cardHold + Math.max(0, noticeHold);
     appliedLift.current = lift;
     liftedBefore.current = lifted;
+    // What a composer line may change without a render, as this pass drew it. Only the card's own
+    // growth: no tray, host line, held floor or card hold in the room, no after-latest tray (its
+    // margin is the stack's height), no thumb drag. Followed, the rows are lifted by exactly the card's
+    // growth (`lifted` is `grown`, the card's side of it, under the cap) and the content's end stays
+    // where it is (the room is the stack's less the lift): the lift alone moves, by the growth.
+    // Scrolled up, the room is held and nothing lifts: only the stack's sizes move.
+    const plain =
+      !sessionSwitched &&
+      dockSpace > 0 &&
+      trayHold === 0 &&
+      cardHold === 0 &&
+      noticeHold === 0 &&
+      floorHeight === 0 &&
+      draggedHeight === undefined &&
+      !afterLatest;
+    const passFollowing = following;
+    const passLift = lifting && lifted === grown && dockCard - cardAtRest <= dockSpace;
+    const passTop = Math.max(0, layout.totalHeight - height);
+    const passHeld = heldRoom.current;
+    let inPlace = 0;
+    growInPlace.current = (space, full, cardHeight) => {
+      if (!plain || followingRef.current !== passFollowing) return false;
+      const by = inPlace + space - dockSpaceRef.current;
+      if (passFollowing) {
+        if (!passLift) return false;
+        const nowGrown = grown + by;
+        const nowAtDock = atDock + by;
+        if (nowGrown <= 0.5 || passTop <= 0 || nowAtDock - height <= 0) return false;
+        if (nowGrown > Math.round(nowAtDock - height - FOLLOW_BOTTOM_DEADBAND_PX - 1)) return false;
+        const nextLift = Math.round(passTop - (nowAtDock - height));
+        liftRef.current = nextLift;
+        appliedLift.current = nextLift;
+        liftedBefore.current = lifted + by;
+        heldRoom.current = passHeld + by;
+      } else cardRest.current = cardHeight;
+      inPlace = by;
+      dockSpaceRef.current = space;
+      dockHeightRef.current = full;
+      dockCardRef.current = cardHeight;
+      dockRoomRef.current = space + restExtra;
+      previousViewport.current = { ...previousViewport.current, dockSpace: space, dockCard: cardHeight };
+      dockDrawn.current = true;
+      drawDock();
+      return true;
+    };
     // A view that follows keeps the card height it began following at; any other takes the card's.
     if (!lifting) cardRest.current = dockCard;
     // The room a followed view keeps (`floor` above), until the rows fill it or it stops following.
