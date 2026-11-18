@@ -387,7 +387,7 @@ class Reconcile(unittest.TestCase):
         for spec in pools.values():
             self.assertEqual(runner_pools.allowed(spec, pools), runner_pools.members(spec))
 
-    def test_the_release_valve_never_goes_below_min_vcpu(self) -> None:
+    def test_a_pool_never_goes_below_min_vcpu(self) -> None:
         # 2026-11-18 11:47Z-13:18Z: with 16, 8 and 32 vCPU marked dead the valve put linux_16 on 4 and then 2 vCPU,
         # and every fat-LTO cmux-tui tree build there was SIGKILLed out of memory (run 44289517882, acpmux rustc on
         # blacksmith-4vcpu-ubuntu-2404, then 12 runs on 2 vCPU), so no tree published and the NEXT nightlies failed.
@@ -400,13 +400,12 @@ class Reconcile(unittest.TestCase):
                                      "blacksmith-32vcpu-ubuntu-2404"]},
         }
         self.assertEqual(runner_pools.spec_problems(pools), [])
-        self.assertEqual(runner_pools.valve_labels(pools["linux_16"], pools), [])
         dead = {"blacksmith-16vcpu-ubuntu-2404", "blacksmith-8vcpu-ubuntu-2404", "blacksmith-32vcpu-ubuntu-2404",
                 "blacksmith-4vcpu-ubuntu-2404"}
         value, _ = runner_pools.reconcile({}, pools, dead_now=dead, served_now=(), now=NOW)
         # It waits on its own first member rather than taking a size its jobs are killed on.
         self.assertEqual(value["linux_16"], "blacksmith-16vcpu-ubuntu-2404")
-        self.assertEqual(value["linux_8"], "blacksmith-2vcpu-ubuntu-2404")  # no floor: the valve as before
+        self.assertEqual(value["linux_8"], "blacksmith-8vcpu-ubuntu-2404")  # no valve: it keeps its first member
         # A value below the floor is not allowed, so a hand edit is reset too.
         self.assertTrue(runner_pools.value_problems({**value, "linux_16": "blacksmith-4vcpu-ubuntu-2404"}, pools))
 
