@@ -74,6 +74,7 @@ pub mod session_limits;
 pub(crate) mod session_move_carry;
 pub(crate) mod session_move_plan;
 pub mod session_queue;
+pub mod search;
 pub mod session_search;
 pub mod session_turn_cap;
 pub mod shutdown;

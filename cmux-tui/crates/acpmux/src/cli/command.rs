@@ -52,6 +52,13 @@ pub enum Command {
     /// Who else works on these files: the other live and recent sessions, here and on peers, that
     /// read or edited them, share this worktree or branch, or work on the same topic. With no
     /// files, what the session this shell runs in edited lately.
+    /// Where TEXT was said in the Claude Code and Codex transcripts here (every session, its
+    /// subagents, the turns before a compaction), and on peers with `--host all`: each hit's
+    /// session, turn, line, time, role and the text around it, newest first, from an index that
+    /// reads only what each transcript appended since the last search. Use it to find what was
+    /// said earlier instead of grepping a transcript.
+    #[command(alias = "grep")]
+    Search(crate::cli::search::SearchArgs),
     #[command(name = "who-else", alias = "whoelse", alias = "overlap")]
     WhoElse(crate::cli::who_else::WhoElseArgs),
     /// What turns on this machine cost, whatever harness ran them: totals, then one line per

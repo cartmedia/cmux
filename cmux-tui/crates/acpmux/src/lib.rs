@@ -256,6 +256,7 @@ pub mod session_name;
 pub mod session_order;
 mod session_scope;
 pub mod session_search;
+pub mod transcript_search;
 /// A workspace here for the person's other machines, over the hub carrier (`session_service.rs`).
 #[cfg(feature = "hub-carrier")]
 pub mod session_service;
