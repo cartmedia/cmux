@@ -1,0 +1,9 @@
+{"envs":[["light","none"],["dark","none"]],
+ "shots":[
+  {"name":"cmux","entry":"agent-pane.transcript-look","variant":"cmux","widthName":"wide","width":1240,"height":1700,"deviceScaleFactor":1,"setup":"document.querySelector('.cv-worked.is-toggle')?.click()"},
+  {"name":"claude","entry":"agent-pane.transcript-look","variant":"claude","widthName":"wide","width":1240,"height":1700,"deviceScaleFactor":1,"setup":"document.querySelector('.cv-worked.is-toggle')?.click()"},
+  {"name":"codex","entry":"agent-pane.transcript-look","variant":"codex","widthName":"wide","width":1240,"height":1700,"deviceScaleFactor":1,"setup":"document.querySelector('.cv-worked.is-toggle')?.click()"},
+  {"name":"studio","entry":"agent-pane.transcript-look","variant":"studio","widthName":"wide","width":1240,"height":1700,"deviceScaleFactor":1,"setup":"document.querySelector('.cv-worked.is-toggle')?.click()"},
+  {"name":"plain-prompt","entry":"agent-pane.transcript-look","variant":"plain-prompt","widthName":"wide","width":1240,"height":1700,"deviceScaleFactor":1,"setup":"document.querySelector('.cv-worked.is-toggle')?.click()"},
+  {"name":"card-tools","entry":"agent-pane.transcript-look","variant":"card-tools","widthName":"wide","width":1240,"height":1700,"deviceScaleFactor":1,"setup":"document.querySelector('.cv-worked.is-toggle')?.click()"}
+ ]}
