@@ -266,6 +266,20 @@ try {
       const paneRenders = await Promise.all(
         pages.map((page) => page.evaluate(() => Number((window as any).cmuxAcpmuxDebug.renders().pane ?? 0))),
       );
+      if (PROFILE) {
+        // Which parts of each page drew, per change heard: what still redraws for another chat's event.
+        const counts = await Promise.all(
+          pages.map((page) => page.evaluate(() => (window as any).cmuxAcpmuxDebug.renders() as Record<string, number>)),
+        );
+        const heard = Math.max(1, (RATE * (performance.now() - wallBefore)) / 1000);
+        counts.forEach((byName, index) => {
+          const top = Object.entries(byName)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([name, count]) => `${name} ${round1(count / heard)}`);
+          console.log(`RENDERS n=${size} page ${index}: ${top.join(", ")}`);
+        });
+      }
       const changes = await Promise.all(pages.map((page) => page.evaluate(() => (window as any).__scale.stop())));
       const stats = (await typing.evaluate(() => (window as any).cmuxAcpmuxDebug.typingStats())) as Record<string, any>;
       const long = (
