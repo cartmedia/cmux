@@ -917,3 +917,48 @@ fn launch_landing_reopens_the_last_workspace_and_tab() {
     );
     assert_eq!(call(c"window_launch_landing", b"[").0, ERR_INVALID);
 }
+
+#[test]
+fn editors_table_lists_the_editors_and_pick_orders_the_installed_ones() {
+    let (code, body) = call_json(c"window_editors_table", &json!({}));
+    assert_eq!(code, OK);
+    let editors = body["editors"].as_array().expect("editors");
+    assert_eq!(editors.len(), 16);
+    assert_eq!(
+        editors[0],
+        json!({
+            "id": "vscode",
+            "name": "Visual Studio Code",
+            "bundleIds": ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"],
+            "symbol": "chevron.left.forwardslash.chevron.right",
+            "remoteScheme": "vscode",
+        })
+    );
+    assert_eq!(editors[2]["id"], "zed");
+    assert_eq!(editors[2]["remoteScheme"], Value::Null);
+
+    let pick = |request: Value| call_json(c"window_editors_pick", &request);
+    assert_eq!(
+        pick(json!({"installed": ["zed", "vscode"], "configured": "cursor"})),
+        (OK, json!({"default": "vscode", "ordered": ["vscode", "zed"]}))
+    );
+    assert_eq!(
+        pick(json!({"installed": ["zed", "vscode"], "configured": "zed"})).1,
+        json!({"default": "zed", "ordered": ["zed", "vscode"]})
+    );
+    assert_eq!(
+        pick(json!({"installed": [], "configured": null})).1,
+        json!({"default": null, "ordered": []})
+    );
+    assert_eq!(pick(json!({})).1, json!({"default": null, "ordered": []}));
+    assert_eq!(call(c"window_editors_pick", b"[").0, ERR_INVALID);
+    assert_eq!(call(c"window_editors_nope", b"{}").0, ERR_INVALID);
+}
+
+#[test]
+fn chat_agent_open_file_reveals_in_finder() {
+    let (code, body) =
+        call_json(c"window_chat_agent_file_place", &json!({"path": "/a", "place": "finder"}));
+    assert_eq!(code, OK);
+    assert_eq!(body, json!({"decision": "open", "target": "finder", "paneless": true}));
+}

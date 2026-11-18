@@ -16,7 +16,7 @@ pub static ACTIONS: &[Action] = &[
         category: "agents",
         symbol: "at",
         surfaces: PALETTE | CONTEXT_MENU,
-        surface_plan: SurfacePlan { cli: Some(Decision::Exempt("clipboard")), context_menus: &[Placement::at("tab", "inspect", 506).folder("copy"), Placement::at("agentChat", "inspect", 1)], ..SurfacePlan::DEFAULT },
+        surface_plan: SurfacePlan { cli: Some(Decision::Exempt("clipboard")), context_menus: &[Placement::at("tab", "inspect", 506).folder("copy"), Placement::at("agentChat", "inspect", 1).folder("copy")], ..SurfacePlan::DEFAULT },
         targets: &["tab", "workspace"],
         cli_name: "action agent-chat-copy-identifier",
         ..Action::DEFAULT

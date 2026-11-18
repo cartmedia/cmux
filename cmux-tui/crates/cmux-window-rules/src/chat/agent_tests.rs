@@ -52,6 +52,15 @@ fn the_editor_needs_no_pane_only_when_none_is_named_or_focused() {
 }
 
 #[test]
+fn finder_reveals_a_local_file_and_needs_no_pane_as_the_editor() {
+    let open = |names, focused| file_place("/a", Some("finder"), names, focused);
+    assert_eq!(open(false, false), FilePlace::Open { target: FileTarget::Finder, paneless: true });
+    assert_eq!(open(true, false), FilePlace::Open { target: FileTarget::Finder, paneless: false });
+    assert_eq!(file_check("a", FileTarget::Finder, false), None);
+    assert_eq!(file_check("/a", FileTarget::Finder, true), Some(FileRefusal::RemotePreview));
+}
+
+#[test]
 fn a_remote_file_must_be_absolute_and_open_as_a_tab() {
     assert_eq!(file_check("a.txt", FileTarget::Tab, true), Some(FileRefusal::NotAbsolute));
     assert_eq!(file_check("/a\0b", FileTarget::Tab, true), Some(FileRefusal::NotAbsolute));

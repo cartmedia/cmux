@@ -138,6 +138,8 @@ pub enum FileTarget {
     Tab,
     /// The editor app.
     Editor,
+    /// Revealed in Finder (a file row's Reveal in Finder, `cmux file open --where finder`).
+    Finder,
 }
 
 /// What Open File does first.
@@ -148,7 +150,7 @@ pub enum FilePlace {
     Picker,
     /// A place outside the catalog's: refused, not ignored.
     InvalidPlace { place: String },
-    /// Open at `target`. `paneless`: the editor needs no pane (none named, none
+    /// Open at `target`. `paneless`: the editor or Finder needs no pane (none named, none
     /// focused), so the file is this Mac's.
     Open { target: FileTarget, paneless: bool },
 }
@@ -166,12 +168,10 @@ pub fn file_place(
     let target = match place.unwrap_or("tab") {
         "tab" => FileTarget::Tab,
         "editor" => FileTarget::Editor,
+        "finder" => FileTarget::Finder,
         other => return FilePlace::InvalidPlace { place: other.to_owned() },
     };
-    FilePlace::Open {
-        target,
-        paneless: target == FileTarget::Editor && !names_pane && !has_focused_pane,
-    }
+    FilePlace::Open { target, paneless: target != FileTarget::Tab && !names_pane && !has_focused_pane }
 }
 
 /// Why Open File refuses a path before it reads the file.
@@ -186,7 +186,7 @@ pub enum FileRefusal {
 
 /// Open File's path check: on another machine (`remote`, a Cloud pane) the path
 /// must be absolute with no NUL and open as a tab; on this Mac a tab needs an
-/// absolute path. The editor's checks are the file opening's own.
+/// absolute path. The editor's and Finder's checks are the file opening's own.
 pub fn file_check(path: &str, target: FileTarget, remote: bool) -> Option<FileRefusal> {
     if remote {
         if !path.starts_with('/') || path.contains('\0') {

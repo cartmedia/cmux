@@ -16,7 +16,7 @@ pub const CASES_MANUAL_NAME: &[EnumCase] = &[EnumCase { value: "manual", title: 
 #[rustfmt::skip]
 pub const CASES_CONFIG_ROSE_PINE: &[EnumCase] = &[EnumCase { value: "config", title: t("ThemeActions", "argument.value.theme.config", "Use Ghostty Config") }, EnumCase { value: "Rose Pine", title: Text::raw("Rose Pine") }, EnumCase { value: "Rose Pine Moon", title: Text::raw("Rose Pine Moon") }, EnumCase { value: "Catppuccin Mocha", title: Text::raw("Catppuccin Mocha") }, EnumCase { value: "TokyoNight", title: Text::raw("TokyoNight") }, EnumCase { value: "Gruvbox Dark", title: Text::raw("Gruvbox Dark") }, EnumCase { value: "Nord", title: Text::raw("Nord") }, EnumCase { value: "Vesper", title: Text::raw("Vesper") }, EnumCase { value: "Soft Blue", title: Text::raw("Soft Blue") }, EnumCase { value: "Clay Orange", title: Text::raw("Clay Orange") }, EnumCase { value: "Olive Grey", title: Text::raw("Olive Grey") }, EnumCase { value: "Rose Pine Dawn", title: Text::raw("Rose Pine Dawn") }, EnumCase { value: "Catppuccin Latte", title: Text::raw("Catppuccin Latte") }, EnumCase { value: "GitHub Light Default", title: Text::raw("GitHub Light Default") }, EnumCase { value: "Soft Blue Light", title: Text::raw("Soft Blue Light") }, EnumCase { value: "Clay Orange Light", title: Text::raw("Clay Orange Light") }];
 #[rustfmt::skip]
-pub const CASES_TAB_EDITOR: &[EnumCase] = &[EnumCase { value: "tab", title: t("Localizable", "argument.value.tab", "Tab") }, EnumCase { value: "editor", title: t("Localizable", "argument.value.editor", "Editor") }];
+pub const CASES_TAB_EDITOR_FINDER: &[EnumCase] = &[EnumCase { value: "tab", title: t("Localizable", "argument.value.tab", "Tab") }, EnumCase { value: "editor", title: t("Localizable", "argument.value.editor", "Editor") }, EnumCase { value: "finder", title: t("Localizable", "argument.value.finder", "Finder") }];
 #[rustfmt::skip]
 pub const CASES_WEBKIT_CEF: &[EnumCase] = &[EnumCase { value: "webkit", title: t("Localizable", "argument.value.webkit", "WebKit") }, EnumCase { value: "cef", title: t("Localizable", "argument.value.cef", "Chromium") }];
 #[rustfmt::skip]
@@ -185,7 +185,7 @@ pub const PANE: Argument = Argument { name: "pane", title: t("Localizable", "arg
 #[rustfmt::skip]
 pub const PATH: Argument = Argument { name: "path", title: t("Localizable", "argument.path", "Path"), kind: ArgKind::String, required: true, suggestions: None, is_target_name: false, is_target_description: false, is_supplied_by_target: false, asked_in_palette: false };
 #[rustfmt::skip]
-pub const WHERE: Argument = Argument { name: "where", title: t("Localizable", "argument.where", "Open In"), kind: ArgKind::Enumeration(CASES_TAB_EDITOR), required: true, suggestions: None, is_target_name: false, is_target_description: false, is_supplied_by_target: false, asked_in_palette: false };
+pub const WHERE: Argument = Argument { name: "where", title: t("Localizable", "argument.where", "Open In"), kind: ArgKind::Enumeration(CASES_TAB_EDITOR_FINDER), required: true, suggestions: None, is_target_name: false, is_target_description: false, is_supplied_by_target: false, asked_in_palette: false };
 #[rustfmt::skip]
 pub const AS_TEXT: Argument = Argument { name: "asText", title: t("ActionCatalog", "argument.asText", "As Text"), kind: ArgKind::Bool, required: true, suggestions: None, is_target_name: false, is_target_description: false, is_supplied_by_target: false, asked_in_palette: false };
 #[rustfmt::skip]
@@ -737,3 +737,7 @@ pub const BROWSER_TOOLBAR_BUTTON: Argument = Argument { name: "button", title: t
 /// pinnable actions, the pinned ones marked.
 #[rustfmt::skip]
 pub const TAB_BAR_BUTTON: Argument = Argument { name: "button", title: t("ActionCatalog", "argument.toolbar.button", "Button"), kind: ArgKind::String, required: true, suggestions: Some(Suggestions { source: "tabBarButtons", pinned: &[], other_title: None, allows_multiple: false }), is_target_name: false, is_target_description: false, is_supplied_by_target: false, asked_in_palette: false };
+/// A code editor of the editor table (`cmux-window-rules` `editors`), listed by the app from its
+/// detected editors (the `editors` suggestions: the default first).
+#[rustfmt::skip]
+pub const EDITOR: Argument = Argument { name: "app", title: t("Localizable", "argument.value.editor", "Editor"), kind: ArgKind::String, required: true, suggestions: Some(Suggestions { source: "editors", pinned: &[], other_title: None, allows_multiple: false }), is_target_name: false, is_target_description: false, is_supplied_by_target: false, asked_in_palette: false };

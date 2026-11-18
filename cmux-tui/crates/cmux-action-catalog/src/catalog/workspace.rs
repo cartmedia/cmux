@@ -1,6 +1,7 @@
 // cmux NEXT action catalog data. Edit by hand: this is the source of truth.
 //! The `WorkspaceActionCatalog` actions.
 
+use super::agent_chat_menu::REVEAL_IN_FINDER;
 use super::args;
 use crate::model::*;
 use crate::text::t;
@@ -669,7 +670,7 @@ pub static ACTIONS: &[Action] = &[
         category: "workspace",
         symbol: "folder.badge.gearshape",
         surfaces: PALETTE | CONTEXT_MENU,
-        surface_plan: SurfacePlan { cli: Some(Decision::Exempt("guiOnly")), context_menu_exemption: Some("pointerMenuTrim"), ..SurfacePlan::DEFAULT },
+        surface_plan: SurfacePlan { cli: Some(Decision::Exempt("guiOnly")), context_menus: &[Placement::at("workspaceRow", "reopen", 2).label(REVEAL_IN_FINDER)], ..SurfacePlan::DEFAULT },
         targets: &["workspace"],
         cli_name: "workspace show-in-finder",
         ..Action::DEFAULT
