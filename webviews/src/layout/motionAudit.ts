@@ -67,7 +67,14 @@ export function startMotionAudit(win: Window, record: (move: UndeclaredMove) => 
     return true;
   };
 
+  // Each frame is read once it has drawn (after its layout and ResizeObserver passes): a read in the
+  // frame callback itself saw a resized page's rows rewrapped but not yet placed, which no frame paints.
+  const drawn = new MessageChannel();
   const tick = () => {
+    handle = -1;
+    drawn.port2.postMessage(0);
+  };
+  drawn.port1.onmessage = () => {
     handle = 0;
     if (stopped) return;
     read();
@@ -90,7 +97,6 @@ export function startMotionAudit(win: Window, record: (move: UndeclaredMove) => 
     if (stopped || handle || doc.visibilityState !== "visible") return;
     started = win.performance.now();
     quiet = 0;
-    if (!frames.length) read();
     handle = win.requestAnimationFrame(tick);
   };
 
@@ -132,12 +138,16 @@ export function startMotionAudit(win: Window, record: (move: UndeclaredMove) => 
   } catch {
     shifts = undefined;
   }
+  // The page at rest as the audit starts; after that only frames that drew are read (a read inside a
+  // resize or mutation sees its layout before the page placed it).
+  read();
   arm();
 
   return {
     stop() {
       stopped = true;
-      if (handle) win.cancelAnimationFrame(handle);
+      if (handle > 0) win.cancelAnimationFrame(handle);
+      drawn.port1.close();
       mutations.disconnect();
       shifts?.disconnect();
       for (const end of acts) end();
