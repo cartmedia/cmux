@@ -183,6 +183,7 @@ class NightlyPathKeepsItsSize(unittest.TestCase):
                        + "(github.run_attempt == 1 && 'glaeda-nightly-only-m4pro' || fromJSON(vars.RUNNER_POOLS).linux_2) || "
                        + tail}
                 for root in PATH_ROOTS}
+        jobs["request-nightly-next"] = {"runs-on": "${{ " + PUSH_ARM + "fromJSON(vars.RUNNER_POOLS).linux_4 || " + tail}
         jobs["checks"] = {"runs-on": "${{ contains(needs.portable-placement.outputs.mini_jobs, ' checks ') && "
                                      "needs.portable-placement.outputs.mini_runner || " + PUSH_ARM
                                      + "fromJSON(vars.RUNNER_POOLS).linux_8 || github.run_attempt == 1 && 'ubuntu-24.04' || "
