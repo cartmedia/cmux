@@ -56,6 +56,11 @@ export type FindPillProps = {
   commandGSteps?: boolean;
   /** Where the search can also replace (the code editor). */
   replace?: FindPillReplace;
+  /** More toggles beside the match-case one, in the same group (Find in Chat's filters). */
+  toggles?: ReactNode;
+  /** Sees a key in the field first; true when it handled it (a suggestion list's arrows, Tab,
+   * Enter and Escape), and the pill then does nothing with it. */
+  onFieldKeyDown?: (event: KeyboardEvent<HTMLInputElement>) => boolean;
   /** Ids kept for callers that address the parts (tests, keyboard scopes). */
   ids?: { root?: string; field?: string; count?: string };
   className?: string;
@@ -81,6 +86,7 @@ export function FindPill(props: FindPillProps) {
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     // Candidate acceptance/cancellation belongs to the IME. WebKit can report only 229 on commit.
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (props.onFieldKeyDown?.(event)) return;
     const commandG = props.commandGSteps !== false && event.metaKey && event.key.toLowerCase() === "g";
     const step = event.key === "Enter" || commandG;
     if (step) {
@@ -92,7 +98,8 @@ export function FindPill(props: FindPillProps) {
       props.onClose();
     }
   };
-  const toggles = labels.matchCase !== undefined && props.onMatchCaseChange !== undefined;
+  const matchCase = labels.matchCase !== undefined && props.onMatchCaseChange !== undefined;
+  const toggles = matchCase || props.toggles !== undefined;
   const replace = props.replace;
   const toggle = replace?.onToggle ? (
     <button
@@ -142,16 +149,19 @@ export function FindPill(props: FindPillProps) {
       <span className="find-pill__separator" aria-hidden="true" />
       {toggles ? (
         <>
-          <button
-            type="button"
-            className="find-pill__button find-pill__button--text"
-            {...pressFeedback}
-            aria-label={labels.matchCase}
-            aria-pressed={props.matchCase ? "true" : "false"}
-            onClick={() => props.onMatchCaseChange?.(!props.matchCase)}
-          >
-            Aa
-          </button>
+          {matchCase ? (
+            <button
+              type="button"
+              className="find-pill__button find-pill__button--text"
+              {...pressFeedback}
+              aria-label={labels.matchCase}
+              aria-pressed={props.matchCase ? "true" : "false"}
+              onClick={() => props.onMatchCaseChange?.(!props.matchCase)}
+            >
+              Aa
+            </button>
+          ) : null}
+          {props.toggles}
           <span className="find-pill__separator" aria-hidden="true" />
         </>
       ) : null}
