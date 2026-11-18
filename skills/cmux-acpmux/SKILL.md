@@ -158,9 +158,17 @@ hit. Never grep a transcript for it. To read a hit whole with the messages aroun
 search --show SESSION:LINE` (the `transcript_read` tool, `{session, line}` from the hit), or a
 whole turn with `--show SESSION --turn N`; bounded, so safe on a huge chat.
 
+The query takes operators (the same in the tool, the CLI, Find in Chat and the palette): words
+(all of them, any order), `"exact phrase"`, `-word` / `-"a phrase"` (leave out),
+`from:me|agent|tool`, `agent:claude|codex`, `folder:NAME` (`repo:NAME`, the chat's working
+directory), `since:` / `before:` (`7d`, `24h`, `30m`, `today`, `yesterday`, `2026-11-01`),
+`in:this` / `in:all`. `--case-sensitive` (`caseSensitive: true`) matches letter case. An unknown
+`key:value` (a URL, `error: x`) is searched as written.
+
 ```bash
-acpmux search "four agent pages" --session self   # this chat
-acpmux search "merge_hold" --machine all --since 2d   # every session, every peer
+acpmux search '"four agent pages"' --session self   # this chat, the exact phrase
+acpmux search merge_hold --machine all --since 2d   # every session, every peer
+acpmux search 'deploy -flaky from:agent agent:codex since:yesterday'   # quote a -word so it is not a flag
 acpmux search --show SESSION:LINE --after 4   # the hit, whole, and what came next
 ```
 

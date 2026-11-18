@@ -635,6 +635,9 @@ pub mod method {
     /// What was said in the Claude Code and Codex transcripts here (and on peers), newest first
     /// (`transcript_search.rs`); the local socket, the app and peers only.
     pub const MUX_TRANSCRIPT_SEARCH: &str = "_acpmux/transcript_search";
+    /// How a search box's query reads in the search syntax, and the operator completions at its
+    /// cursor (`transcript_search::syntax`). Pure: no index, no I/O.
+    pub const MUX_SEARCH_SYNTAX: &str = "_acpmux/search_syntax";
     /// The text around a transcript search hit: the message at a line and the ones next to it,
     /// or a turn (`transcript_read.rs`); the local socket, the app and peers only.
     pub const MUX_TRANSCRIPT_READ: &str = "_acpmux/transcript_read";

@@ -227,12 +227,13 @@ fn base_tools() -> Value {
         },
         {
             "name": "transcript_search",
-            "description": "Find what was said earlier: where a phrase appears in the Claude Code and Codex transcripts on this machine (every session, desktop and terminal chats too, their subagents, and the turns before a compaction), newest first, each hit with its session, turn, line, time, role and the text around it. One call instead of grepping a transcript (`acpmux search` on the command line). session self is this chat; host all asks every peer too.",
+            "description": "Find what was said earlier: where a phrase appears in the Claude Code and Codex transcripts on this machine (every session, desktop and terminal chats too, their subagents, and the turns before a compaction), newest first, each hit with its session, turn, line, time, role and the text around it. One call instead of grepping a transcript (`acpmux search` on the command line). session self is this chat; host all asks every peer too. The query takes operators: \"exact phrase\", -word and -\"a phrase\" (leave out), from:me|agent|tool, agent:claude|codex, folder:NAME (repo:NAME; the chat's working directory), since: and before: (7d, 24h, 30m, today, yesterday, 2026-11-01), in:this (this chat) and in:all (every chat).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The text to find, as written (any case)."},
-                    "session": {"type": "string", "description": "Only this session: self, a name, an acpmux session id, or a Claude Code or Codex session id. Default: every session."},
+                    "query": {"type": "string", "description": "The words to find (every one, any order, any case, in one message) and any operators: \"a phrase\", -word, from:me|agent|tool, agent:claude|codex, folder:NAME, since:7d|24h|today|2026-11-01, before:..., in:this|all."},
+                    "session": {"type": "string", "description": "Only this session: self, a name, an acpmux session id, or a Claude Code or Codex session id. Default: every session (in:this in the query: this chat; in:all: every session, whatever this says)."},
+                    "caseSensitive": {"type": "boolean", "description": "Match letter case too (default false)."},
                     "host": {"type": "string", "description": "all: this machine and every peer; a peer's name: that machine. Default: this machine."},
                     "role": {"type": "string", "enum": ["user", "assistant", "tool"], "description": "Only prompts, replies or tool calls and their output."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": crate::transcript_search::MAX_LIMIT, "description": "At most this many hits (default 20)."}
@@ -603,8 +604,19 @@ pub(crate) async fn transcript_search_tool(
         "role": args.get("role"),
         "limit": args.get("limit"),
         "host": args.get("host"),
+        "caseSensitive": args.get("caseSensitive"),
     });
-    match arg(args, "session") {
+    // The query's `in:` picks the scope here, where widening is the caller's to do: the daemon
+    // never widens a search of one chat (`transcript_search.rs`).
+    let scope =
+        acpmux_transcript_search::syntax::parse(query, acpmux_transcript_search::Clock::now(0))
+            .scope;
+    let session_arg = match scope {
+        Some(acpmux_transcript_search::Scope::All) => None,
+        Some(acpmux_transcript_search::Scope::This) => Some("self"),
+        None => arg(args, "session"),
+    };
+    match session_arg {
         Some("self" | "@") if session.is_empty() => {
             return error_result("this server runs in no acpmux chat: name a session".to_owned());
         }

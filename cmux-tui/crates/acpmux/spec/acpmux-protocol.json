@@ -1050,6 +1050,14 @@
     },
     {
       "kind": "request",
+      "name": "_acpmux/search_syntax",
+      "params": {
+        "$ref": "#/types/SearchSyntaxParams"
+      },
+      "result": true
+    },
+    {
+      "kind": "request",
       "name": "_acpmux/transcript_read",
       "params": true,
       "result": true
@@ -5574,6 +5582,18 @@
       },
       "type": "object"
     },
+    "SearchSyntaxParams": {
+      "additionalProperties": false,
+      "properties": {
+        "_meta": {
+          "$ref": "#/types/RequestMeta"
+        },
+        "cursor": true,
+        "query": true,
+        "tzOffsetMinutes": true
+      },
+      "type": "object"
+    },
     "SecretSubmitParams": {
       "additionalProperties": false,
       "properties": {
@@ -7567,6 +7587,8 @@
         "_meta": {
           "$ref": "#/types/RequestMeta"
         },
+        "beforeMs": true,
+        "caseSensitive": true,
         "context": true,
         "harnessSessionId": true,
         "host": true,
@@ -7577,6 +7599,7 @@
         "role": true,
         "sessionId": true,
         "sinceMs": true,
+        "tzOffsetMinutes": true,
         "window": true
       },
       "type": "object"

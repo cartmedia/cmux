@@ -1,8 +1,27 @@
-//! `_acpmux/transcript_search {query, sessionId?, harnessSessionId?, role?, sinceMs?, limit?,
-//! context?, host?, order?, window?, offset?}` and `acpmux search` (Leo, 2026-11-18: "shouldn't
-//! you be able to like have better tools for finding stuff?"): what was said in the Claude Code
-//! and Codex transcripts on this machine (and with `host: "all"` its peers'), from the index
-//! `acpmux-transcript-search` keeps at `$ACPMUX_HOME/transcript-search/index-v1.sqlite`.
+//! `_acpmux/transcript_search {query, sessionId?, harnessSessionId?, role?, sinceMs?, beforeMs?,
+//! caseSensitive?, tzOffsetMinutes?, limit?, context?, host?, order?, window?, offset?}` and
+//! `acpmux search` (Leo, 2026-11-18: "shouldn't you be able to like have better tools for finding
+//! stuff?"): what was said in the Claude Code and Codex transcripts on this machine (and with
+//! `host: "all"` its peers'), from the index `acpmux-transcript-search` keeps at
+//! `$ACPMUX_HOME/transcript-search/index-v1.sqlite`.
+//!
+//! `query` is read by the search syntax (`acpmux_transcript_search::syntax`; Leo, 2026-11-18: "I
+//! know that VS Code has like a decent kind of searching thing with arguments and whatnot,
+//! likewise with Obsidian"): words (all of them, any order), `"a phrase"`, `-word`,
+//! `-"a phrase"`, `from:me|agent|tool`, `agent:claude|codex`, `folder:NAME` (`repo:NAME`),
+//! `since:` / `before:` (`7d`, `24h`, `today`, `yesterday`, `2026-11-01`, local days by
+//! `tzOffsetMinutes`, minutes ahead of UTC), `in:this|all`. Plain words search as they always did.
+//! `role`, `sinceMs` and `beforeMs` apply with the operators (the narrower time wins; `from:`
+//! over `role`). `caseSensitive: true` matches letter case too. `in:` never widens a search here:
+//! a caller that may search every chat (the CLI, the MCP tool) drops `sessionId` itself on
+//! `in:all`; with `sessionId` given (the agent pane's Find in Chat is pinned to its own chat)
+//! `in:all` is a problem and the search stays in that chat, and `in:this` with no chat named is a
+//! problem too. The answer's `parsed` is how the query read (`Parsed::to_json`: terms, exclude,
+//! role, agent, in, folder, sinceMs, beforeMs, chips and problems), for a search box's chips.
+//!
+//! `_acpmux/search_syntax {query, cursor?, tzOffsetMinutes?}` -> `{parsed, completions: [{insert,
+//! label, detail, start, end}]}`: the same reading and the operator suggestions at `cursor`
+//! (UTF-16 offsets throughout), with no index and no I/O ([`syntax`]).
 //!
 //! `order`: `"newest"` (the default: newest first) or `"transcript"` (oldest first by place: the
 //! transcript's path, then its line). `window: {fromMs, toMs}`: the hits written within it come
@@ -70,6 +89,46 @@ pub struct Params {
     /// `(fromMs, toMs)`: the hits written within it first.
     pub window: Option<(i64, i64)>,
     pub offset: usize,
+    pub before_ms: Option<i64>,
+    pub case_sensitive: bool,
+    /// Minutes the caller's local time is ahead of UTC, for `since:today` and dates.
+    pub tz_offset_min: Option<i32>,
+}
+
+/// The furthest a time zone is from UTC, in minutes, either way.
+const MAX_TZ_OFFSET_MIN: i64 = 18 * 60;
+
+/// `tzOffsetMinutes` of a request: none, or minutes within [`MAX_TZ_OFFSET_MIN`].
+pub fn tz_offset(v: &Value) -> Result<Option<i32>, String> {
+    match v.get("tzOffsetMinutes") {
+        None | Some(Value::Null) => Ok(None),
+        Some(n) => match n.as_i64() {
+            Some(m) if m.abs() <= MAX_TZ_OFFSET_MIN => Ok(Some(m as i32)),
+            _ => Err(format!(
+                "tzOffsetMinutes must be whole minutes within -{MAX_TZ_OFFSET_MIN}..{MAX_TZ_OFFSET_MIN}"
+            )),
+        },
+    }
+}
+
+/// `_acpmux/search_syntax {query, cursor?, tzOffsetMinutes?}`: how `query` reads and the
+/// operator completions at `cursor` (UTF-16; default its end). Pure.
+pub fn syntax(v: &Value) -> Result<Value, String> {
+    let query = v.get("query").and_then(Value::as_str).ok_or("query is required")?;
+    let tz = tz_offset(v)?;
+    let cursor = match v.get("cursor") {
+        None | Some(Value::Null) => query.encode_utf16().count(),
+        Some(c) => c.as_u64().ok_or("cursor must be a UTF-16 offset")? as usize,
+    };
+    let parsed = ts::syntax::parse(query, ts::Clock::now(tz.unwrap_or(0)));
+    let completions: Vec<Value> = ts::syntax::complete(query, cursor)
+        .into_iter()
+        .map(|c| {
+            json!({"insert": c.insert, "label": c.label, "detail": c.detail,
+                "start": c.start, "end": c.end})
+        })
+        .collect();
+    Ok(json!({"parsed": parsed.to_json(), "completions": completions}))
 }
 
 impl Params {
@@ -112,6 +171,10 @@ impl Params {
             }
         };
         let offset = v.get("offset").and_then(Value::as_u64).map_or(0, |n| n as usize);
+        let case_sensitive = match v.get("caseSensitive") {
+            None | Some(Value::Null) => false,
+            Some(b) => b.as_bool().ok_or("caseSensitive must be true or false")?,
+        };
         Ok(Self {
             query,
             session: text("sessionId"),
@@ -124,6 +187,9 @@ impl Params {
             order,
             window,
             offset: offset.min(MAX_OFFSET),
+            before_ms: v.get("beforeMs").and_then(Value::as_i64),
+            case_sensitive,
+            tz_offset_min: tz_offset(v)?,
         })
     }
 
@@ -148,19 +214,50 @@ impl Params {
         if self.offset > 0 {
             v["offset"] = json!(self.offset);
         }
+        if let Some(before) = self.before_ms {
+            v["beforeMs"] = json!(before);
+        }
+        if self.case_sensitive {
+            v["caseSensitive"] = json!(true);
+        }
+        if let Some(tz) = self.tz_offset_min {
+            v["tzOffsetMinutes"] = json!(tz);
+        }
         v
     }
 
-    fn query(&self) -> ts::Query {
-        let mut q = ts::Query::new(self.query.trim());
+    /// How `query` reads, with what its `in:` cannot do here said as problems (`in:` never
+    /// widens a search on the daemon: see the module doc).
+    pub fn parsed(&self) -> ts::Parsed {
+        let mut parsed =
+            ts::syntax::parse(&self.query, ts::Clock::now(self.tz_offset_min.unwrap_or(0)));
+        let scoped = self.session.is_some() || self.harness_session.is_some();
+        match parsed.scope {
+            Some(ts::Scope::All) if scoped => parsed
+                .problems
+                .push("in:all: this search is of one chat; it stays in that chat".to_owned()),
+            Some(ts::Scope::This) if !scoped => {
+                parsed.problems.push("in:this: no chat is named; every chat is searched".to_owned())
+            }
+            _ => {}
+        }
+        parsed
+    }
+
+    /// The index query `parsed` (this search's [`Self::parsed`]) and the params ask.
+    pub fn query(&self, parsed: &ts::Parsed) -> ts::Query {
+        let mut q = ts::Query::new("");
         q.sessions = self.harness_session.clone().map(|s| vec![s]);
         q.role = self.role.as_deref().and_then(ts::Role::parse);
         q.since_ms = self.since_ms;
+        q.before_ms = self.before_ms;
+        q.case_sensitive = self.case_sensitive;
         q.limit = self.limit;
         q.context = self.context;
         q.order = self.order;
         q.window = self.window;
         q.offset = self.offset;
+        parsed.apply(&mut q);
         q
     }
 
@@ -214,7 +311,8 @@ pub fn search_here(p: &Params, roots: &ts::Roots, host: Option<&str>) -> Result<
         *guard = Some(ts::Index::open(&index_path()).map_err(|e| e.to_string())?);
     }
     let Some(index) = guard.as_ref() else { return Err("transcript index: not open".into()) };
-    let (hits, done) = ts::search(index, &sources, &p.query()).map_err(|e| e.to_string())?;
+    let parsed = p.parsed();
+    let (hits, done) = ts::search(index, &sources, &p.query(&parsed)).map_err(|e| e.to_string())?;
     drop(guard);
     let mut answer = json!({
         "hits": hits.iter().map(|h| hit_value(h, host)).collect::<Vec<_>>(),
@@ -224,6 +322,7 @@ pub fn search_here(p: &Params, roots: &ts::Roots, host: Option<&str>) -> Result<
         "queryMs": done.query_ms,
         "tookMs": started.elapsed().as_millis() as u64,
         "unreached": [],
+        "parsed": parsed.to_json(),
     });
     if let Some(total) = done.total {
         answer["total"] = json!(total);
@@ -360,7 +459,10 @@ pub fn place(
         return Ok(());
     };
     let (lo, hi) = (lo.saturating_sub(PLACE_SLACK_MS), hi.saturating_add(PLACE_SLACK_MS));
-    let lower = query.trim().to_ascii_lowercase();
+    // The query's first term, as the index matched it (not its operators).
+    let parsed = ts::syntax::parse(query, ts::Clock::now(0));
+    let first = parsed.terms.first().map_or("", |t| t.text.as_str());
+    let lower = first.trim().to_ascii_lowercase();
     // (at, seq, role, holds the query)
     let mut near: Vec<(i64, u64, Role, bool)> = Vec::new();
     store.text_entries(id, &mut |entry| {
@@ -395,7 +497,7 @@ pub fn place(
 /// opened on first use, so a long `_acpmux/transcript_search` never holds it up.
 pub fn chat_search() -> crate::chats::deep::Search {
     let index: Mutex<Option<ts::Index>> = Mutex::new(None);
-    Box::new(move |words| {
+    Box::new(move |ask: &crate::chats::deep::Ask| {
         let mut held = index.lock().unwrap_or_else(|e| e.into_inner());
         if held.is_none() {
             match ts::Index::open(&index_path()) {
@@ -408,7 +510,8 @@ pub fn chat_search() -> crate::chats::deep::Search {
         }
         let index = held.as_ref()?;
         let t = Instant::now();
-        match index.chats(words, crate::chats::deep::SCAN, crate::chats::deep::CONTEXT) {
+        let q = ask.query()?;
+        match index.chats_matching(&q, crate::chats::deep::SCAN, crate::chats::deep::CONTEXT) {
             Ok(found) => {
                 tracing::debug!(
                     chats = found.len(),

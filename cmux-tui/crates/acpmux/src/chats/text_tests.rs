@@ -412,3 +412,37 @@ fn a_held_save_interrupted_before_its_rename_leaves_the_old_copy() {
         },
     );
 }
+
+/// The search syntax's needle: a phrase as written, what a hit must not hold, whose it must be,
+/// under both passes (ASCII and not).
+#[test]
+fn a_needle_of_terms_finds_phrases_and_drops_excluded_and_other_roles() {
+    let doc = Doc::new(
+        Stamp { updated_ms: 0, messages: None },
+        &[
+            turn("fix the   parser bug", "the parser bug is flaky"),
+            turn("Ünïcode parser bug", "fixed the bug in the parser"),
+        ],
+    );
+    let of = |terms: &[&str], exclude: &[&str], answers: Option<bool>| {
+        let terms: Vec<String> = terms.iter().map(|t| (*t).to_owned()).collect();
+        let exclude: Vec<String> = exclude.iter().map(|t| (*t).to_owned()).collect();
+        Needle::of_terms(&terms, &exclude, answers).unwrap()
+    };
+    let found = |n: &Needle| {
+        doc.find(n, &Matcher::new(n)).map(|f| {
+            let m = &doc.messages[f.message as usize];
+            (m.turn, m.answer, f.matches)
+        })
+    };
+    assert_eq!(found(&of(&["parser bug"], &[], None)), Some((1, false, 3)), "a phrase");
+    assert_eq!(found(&of(&["bug parser"], &[], None)), None, "not in another order");
+    assert_eq!(found(&of(&["parser", "bug"], &["flaky"], None)), Some((1, true, 3)));
+    assert_eq!(found(&of(&["parser bug"], &[], Some(true))), Some((0, true, 1)), "answers only");
+    assert_eq!(found(&of(&["parser bug"], &[], Some(false))), Some((1, false, 2)), "prompts");
+    assert_eq!(found(&of(&["ünïcode"], &[], None)), Some((1, false, 1)), "not ASCII");
+    assert_eq!(found(&of(&["parser"], &["ÜNÏCODE", "flaky", "fixed"], None)), Some((0, false, 1)));
+    assert!(Needle::of_terms(&[" ".to_owned()], &[], None).is_err());
+    // Plain words keep the needle they always were.
+    assert_eq!(needle("parser bug"), of(&["parser", "bug"], &[], None));
+}
