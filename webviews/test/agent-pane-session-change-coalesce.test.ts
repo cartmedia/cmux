@@ -341,8 +341,8 @@ test("a hidden pane draws its chat's turns and new replies, not its reply's text
     for (const [index, status] of ["in_progress", "in_progress", "completed"].entries())
       socket.notify("_acpmux/event", {
         sessionId: SELECTED,
-        seq: 470 + index,
-        at: 470 + index,
+        seq: 469 + index,
+        at: 469 + index,
         dir: "in",
         kind: "tool_call_update",
         msg: {
@@ -350,6 +350,21 @@ test("a hidden pane draws its chat's turns and new replies, not its reply's text
           params: { sessionId: SELECTED, update: { sessionUpdate: "tool_call_update", toolCallId: "read-1", status } },
         },
       });
+    // So does any other record but a new tool call: the plan, usage and the rest draw a hidden tab nothing.
+    socket.notify("_acpmux/event", {
+      sessionId: SELECTED,
+      seq: 472,
+      at: 472,
+      dir: "in",
+      kind: "plan",
+      msg: {
+        method: "session/update",
+        params: {
+          sessionId: SELECTED,
+          update: { sessionUpdate: "plan", entries: [{ content: "Read", priority: "high", status: "pending" }] },
+        },
+      },
+    });
     jest.advanceTimersByTime(10_000);
     expect(snapshots() - before).toBe(4);
     record(socket, 473, "turn_end");
