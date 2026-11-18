@@ -138,6 +138,10 @@ nonisolated enum AcpmuxPaneMethods {
         // acpmux transcript_search.rs): the daemon's index, not only the rows loaded. Read only,
         // scoped to the pane's session; no `host` or `harnessSessionId`, so it never reads past it.
         "_acpmux/transcript_search",
+        // How the Find bar's query reads in the search syntax (its chips) and the operator
+        // completions at its cursor (acpmux transcript_search.rs syntax). Pure: no transcript, no
+        // index, no I/O, so no session scope.
+        "_acpmux/search_syntax",
         // Resume a paused agent pair of a chat in the pane's scope (the pause row's Resume; acpmux
         // hub/agent_pairs.rs): delivers the messages the two agents already sent and the guard held.
         // `peerSessionId` only picks one of that chat's paused pairs; acpmux resumes no pair the

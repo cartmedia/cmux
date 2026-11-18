@@ -1323,6 +1323,13 @@ export interface RouteListParams {
   sessionId?: unknown;
 }
 
+export interface SearchSyntaxParams {
+  _meta?: RequestMeta;
+  cursor?: unknown;
+  query?: unknown;
+  tzOffsetMinutes?: unknown;
+}
+
 export interface SecretSubmitParams {
   _meta?: RequestMeta;
   secretId?: unknown;
@@ -2191,6 +2198,8 @@ export type ToolSummary = {
 
 export interface TranscriptSearchParams {
   _meta?: RequestMeta;
+  beforeMs?: unknown;
+  caseSensitive?: unknown;
   context?: unknown;
   harnessSessionId?: unknown;
   host?: unknown;
@@ -2201,6 +2210,7 @@ export interface TranscriptSearchParams {
   role?: unknown;
   sessionId?: unknown;
   sinceMs?: unknown;
+  tzOffsetMinutes?: unknown;
   window?: unknown;
 }
 

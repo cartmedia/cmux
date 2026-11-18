@@ -1,8 +1,14 @@
 //! `acpmux search TEXT [--session ID|NAME|self] [--machine MACHINE|all] [--role user|assistant|tool]
-//! [--since DUR] [--limit N] [--context BYTES]`: where TEXT was said in the Claude Code and Codex
-//! transcripts here (and on peers with `--machine all`), newest first, each hit with its session,
-//! turn, line, time, role and the text around it as written (`_acpmux/transcript_search`,
-//! `transcript_search.rs`).
+//! [--since DUR] [--until DUR] [--case-sensitive] [--limit N] [--context BYTES]`: where TEXT was
+//! said in the Claude Code and Codex transcripts here (and on peers with `--machine all`), newest
+//! first, each hit with its session, turn, line, time, role and the text around it as written
+//! (`_acpmux/transcript_search`, `transcript_search.rs`).
+//!
+//! TEXT is the search syntax: words (all of them, any order), `"a phrase"`, `-word`,
+//! `from:me|agent|tool`, `agent:claude|codex`, `folder:NAME` (`repo:NAME`), `since:` / `before:`
+//! (`7d`, `24h`, `today`, `yesterday`, `2026-11-01`), `in:this` (as `--session self`) and `in:all`
+//! (every session, whatever `--session` says). A `-word` first needs `--` before it
+//! (`acpmux search -- -flaky deploy`), as any argument starting with `-` does.
 //!
 //! Leo, 2026-11-18: "shouldn't you be able to like have better tools for finding stuff?" The desktop
 //! coordinator took 7 tool calls to find a phrase it had written earlier in its own 542 MB
@@ -32,7 +38,9 @@ use crate::transcript_search::{self as search, Params};
 
 #[derive(Args, Debug, Clone)]
 pub struct SearchArgs {
-    /// The text to find, as written (any case), anywhere in a prompt, a reply or a tool call.
+    /// The words to find (every one, any order, any case) in a prompt, a reply or a tool call,
+    /// and operators: "a phrase", -word (after `--`), from:me|agent|tool, agent:claude|codex,
+    /// folder:NAME, since:7d|24h|today|2026-11-01, before:..., in:this|all.
     #[arg(required_unless_present = "show")]
     pub text: Vec<String>,
     /// Read a hit instead of searching: `SESSION:LINE` (as a hit's header names them; `self:LINE`
@@ -73,6 +81,12 @@ pub struct SearchArgs {
     /// Only what was said this long ago or later: 30m, 6h, 2d.
     #[arg(long, value_name = "DURATION")]
     pub since: Option<String>,
+    /// Only what was said more than this long ago: 30m, 6h, 2d.
+    #[arg(long, value_name = "DURATION")]
+    pub until: Option<String>,
+    /// Match letter case too.
+    #[arg(long)]
+    pub case_sensitive: bool,
     /// At most this many hits (most 200).
     #[arg(long, short = 'n', default_value_t = search::DEFAULT_LIMIT)]
     pub limit: usize,
@@ -114,12 +128,15 @@ async fn session_target(key: &str) -> Result<(String, Option<String>)> {
 }
 
 pub fn params(args: &SearchArgs) -> Result<Params> {
-    let since_ms = args
-        .since
-        .as_deref()
-        .map(crate::cli::run::ls::parse_duration_ms)
-        .transpose()?
-        .map(|ago| crate::store::now_ms().saturating_sub(ago) as i64);
+    let now = crate::store::now_ms();
+    let ago = |d: Option<&str>| -> Result<Option<i64>> {
+        Ok(d.map(crate::cli::run::ls::parse_duration_ms)
+            .transpose()?
+            .map(|ago| now.saturating_sub(ago) as i64))
+    };
+    let since_ms = ago(args.since.as_deref())?;
+    let before_ms = ago(args.until.as_deref())?;
+    let tz = crate::cli::process::local_offset((now / 1000) as i64) / 60;
     Ok(Params {
         query: args.text.join(" "),
         session: None,
@@ -129,6 +146,9 @@ pub fn params(args: &SearchArgs) -> Result<Params> {
         limit: args.limit.clamp(1, search::MAX_LIMIT),
         context: args.context,
         host: args.host.clone(),
+        before_ms,
+        case_sensitive: args.case_sensitive,
+        tz_offset_min: i32::try_from(tz).ok(),
         ..Params::default()
     })
 }
@@ -138,7 +158,13 @@ pub async fn run(args: SearchArgs, json_out: bool) -> Result<()> {
         return show(&args, json_out).await;
     }
     let mut p = params(&args)?;
-    if let Some(key) = &args.session {
+    // The query's `in:` picks the scope here; the daemon never widens a search of one chat.
+    let session = match p.parsed().scope {
+        Some(acpmux_transcript_search::Scope::All) => None,
+        Some(acpmux_transcript_search::Scope::This) => Some("self".to_owned()),
+        None => args.session.clone(),
+    };
+    if let Some(key) = &session {
         let (id, host) = session_target(key).await?;
         p.harness_session = Some(id);
         if p.host.is_none() {
@@ -335,6 +361,11 @@ pub fn text(answer: &Value, color: bool) -> String {
         out.push_str(&format!(", {} KB new read first", read.div_ceil(1024)));
     }
     out.push_str(")\n");
+    for problem in
+        answer.pointer("/parsed/problems").and_then(Value::as_array).into_iter().flatten()
+    {
+        out.push_str(&format!("(query: {})\n", problem.as_str().unwrap_or("")));
+    }
     for u in answer["unreached"].as_array().into_iter().flatten() {
         out.push_str(&format!(
             "(not searched: {}: {})\n",
@@ -390,6 +421,8 @@ mod tests {
             host: None,
             role: None,
             since: None,
+            until: None,
+            case_sensitive: false,
             limit: search::DEFAULT_LIMIT,
             context: search::DEFAULT_CONTEXT,
             show: show.map(str::to_owned),
@@ -451,11 +484,17 @@ mod tests {
             host: Some("all".into()),
             role: Some("assistant".into()),
             since: Some("2d".into()),
+            until: Some("1d".into()),
+            case_sensitive: true,
             limit: 999,
             context: 100,
             ..show_args(None)
         };
         let p = params(&args).unwrap();
+        assert!(p.case_sensitive);
+        let until = p.before_ms.unwrap();
+        assert!((crate::store::now_ms() as i64 - until - 86_400_000).abs() < 60_000);
+        assert!(p.tz_offset_min.is_some_and(|m| m.abs() <= 18 * 60));
         assert_eq!(p.query, "four agent pages");
         assert_eq!(p.limit, search::MAX_LIMIT);
         assert_eq!(p.host.as_deref(), Some("all"));

@@ -164,3 +164,96 @@ fn hits_are_placed_at_the_logged_message_that_holds_them() {
         hits.iter().map(|h| h.get("seq").and_then(Value::as_u64)).collect();
     assert_eq!(seqs, [Some(1), Some(2), Some(4), None, None, None, Some(5)]);
 }
+
+/// The search syntax's params (`caseSensitive`, `beforeMs`, `tzOffsetMinutes`) and how a query
+/// with operators becomes the index query.
+#[test]
+fn params_read_the_search_syntax_and_its_toggles() {
+    let p = Params::from_value(&json!({
+        "query": "deploy \"the fix\" -flaky from:agent agent:codex folder:cmux since:7d",
+        "caseSensitive": true, "beforeMs": 99, "tzOffsetMinutes": -480, "sinceMs": 5,
+        "role": "user",
+    }))
+    .unwrap();
+    assert!(p.case_sensitive);
+    assert_eq!((p.before_ms, p.tz_offset_min), (Some(99), Some(-480)));
+    assert_eq!(Params::from_value(&p.to_value()).unwrap(), p);
+    let parsed = p.parsed();
+    let q = p.query(&parsed);
+    assert_eq!(q.text, "deploy");
+    assert_eq!(q.also, ["the fix"]);
+    assert_eq!(q.exclude, ["flaky"]);
+    assert_eq!(q.role, Some(ts::Role::Assistant), "from: over role");
+    assert_eq!(q.harness, Some(ts::Harness::Codex));
+    assert_eq!(q.folder.as_deref(), Some("cmux"));
+    assert!(q.since_ms.unwrap() > 5, "the later start");
+    assert_eq!(q.before_ms, Some(99));
+    assert!(q.case_sensitive);
+    assert!(parsed.problems.is_empty());
+
+    // Plain words read as they always did.
+    let plain = Params::from_value(&json!({"query": "four agent pages"})).unwrap();
+    let q = plain.query(&plain.parsed());
+    assert_eq!(
+        (q.text.as_str(), q.also.clone()),
+        ("four", vec!["agent".to_owned(), "pages".to_owned()])
+    );
+    assert!(!q.case_sensitive && q.exclude.is_empty() && q.before_ms.is_none());
+
+    for bad in [
+        json!({"query": "x", "caseSensitive": "yes"}),
+        json!({"query": "x", "tzOffsetMinutes": 5000}),
+        json!({"query": "x", "tzOffsetMinutes": 1.5}),
+    ] {
+        assert!(Params::from_value(&bad).is_err(), "{bad}");
+    }
+}
+
+/// `in:` never widens a search on the daemon: pinned to a chat, `in:all` is a problem.
+#[test]
+fn in_all_never_widens_a_search_of_one_chat() {
+    let pinned = Params::from_value(&json!({"query": "x in:all", "sessionId": "s"})).unwrap();
+    let parsed = pinned.parsed();
+    assert_eq!(parsed.scope, Some(ts::Scope::All));
+    assert_eq!(parsed.problems.len(), 1);
+    assert_eq!(pinned.query(&parsed).sessions, None, "the hub sets it from sessionId");
+    let harness =
+        Params::from_value(&json!({"query": "x in:all", "harnessSessionId": "h"})).unwrap();
+    let parsed = harness.parsed();
+    assert_eq!(parsed.problems.len(), 1);
+    assert_eq!(harness.query(&parsed).sessions, Some(vec!["h".to_owned()]));
+    let this = Params::from_value(&json!({"query": "x in:this"})).unwrap();
+    assert_eq!(this.parsed().problems.len(), 1);
+    assert!(
+        Params::from_value(&json!({"query": "x in:this", "sessionId": "s"}))
+            .unwrap()
+            .parsed()
+            .problems
+            .is_empty()
+    );
+    assert!(
+        Params::from_value(&json!({"query": "x in:all"})).unwrap().parsed().problems.is_empty()
+    );
+}
+
+#[test]
+fn search_syntax_answers_how_a_query_reads_and_what_comes_next() {
+    let got = syntax(&json!({"query": "deploy fr", "tzOffsetMinutes": 60})).unwrap();
+    assert_eq!(got["parsed"]["terms"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        got["completions"],
+        json!([{"insert": "from:", "label": "from:", "detail": "Who said it: me or agent", "start": 7, "end": 9}])
+    );
+    let at = syntax(&json!({"query": "since: x", "cursor": 6})).unwrap();
+    assert_eq!(at["completions"].as_array().unwrap().len(), 5);
+    assert_eq!(at["parsed"]["problems"].as_array().unwrap().len(), 1);
+    let chips = syntax(&json!({"query": "from:me -flaky"})).unwrap();
+    assert_eq!(chips["parsed"]["role"], "user");
+    assert_eq!(chips["parsed"]["chips"][1]["kind"], "exclude");
+    assert!(syntax(&json!({})).is_err());
+    assert!(syntax(&json!({"query": "x", "cursor": "end"})).is_err());
+    assert!(syntax(&json!({"query": "x", "tzOffsetMinutes": 9999})).is_err());
+    // An empty query reads as nothing (a search box before its first key).
+    let empty = syntax(&json!({"query": ""})).unwrap();
+    assert_eq!(empty["completions"], json!([]));
+}
