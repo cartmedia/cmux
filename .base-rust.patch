@@ -1,0 +1,995 @@
+diff --git a/cmux-tui/crates/cmux-feed-core/src/client/view.rs b/cmux-tui/crates/cmux-feed-core/src/client/view.rs
+index 09c348b4c25..850a1b88ee6 100644
+--- a/cmux-tui/crates/cmux-feed-core/src/client/view.rs
++++ b/cmux-tui/crates/cmux-feed-core/src/client/view.rs
+@@ -3,6 +3,8 @@
+ //! mirror's ordered list (no sort per read), with each item's row content,
+ //! pending mark and GitHub detail.
+ 
++use std::collections::HashSet;
++
+ use serde::Deserialize;
+ use serde_json::{Value, json};
+ 
+@@ -42,6 +44,14 @@ pub struct ViewRequest {
+     pub tz_offset_min: Option<i32>,
+     #[serde(default)]
+     pub limit: Option<usize>,
++    /// A delta read: the reader holds every item of its last view and asks
++    /// in full only for these (a `feed-view-changed`'s `changed`). Every
++    /// other item is answered by id alone, `{"id", "same": true}`, which the
++    /// reader fills from its last view; groups, order, counts and totals are
++    /// always whole. A reader that meets a `same` id it does not hold reads
++    /// the whole view.
++    #[serde(default)]
++    pub only: Option<Vec<String>>,
+ }
+ 
+ /// The account a view is for: the cloud lease's person (`id`, the lease
+@@ -87,8 +97,21 @@ impl ViewContext<'_> {
+         value
+     }
+ 
++    /// An item of a delta read: in full when `only` names it (or the read is
++    /// whole), else its id alone ([`ViewRequest::only`]); only a full item
++    /// asks the place lookup.
++    fn item_in(&self, item: &FeedItem, only: Option<&HashSet<&str>>) -> Value {
++        match only {
++            Some(only) if !only.contains(item.id.as_str()) => json!({"id": item.id, "same": true}),
++            _ => self.item(item),
++        }
++    }
++
+     /// The whole view.
+     pub fn view(&self, request: &ViewRequest) -> Value {
++        let only: Option<HashSet<&str>> =
++            request.only.as_ref().map(|ids| ids.iter().map(String::as_str).collect());
++        let only = only.as_ref();
+         let matcher = Matcher::new(request.filter.clone().unwrap_or_default());
+         let limit = request.limit.unwrap_or(MAX_VIEW_ENTRIES).min(MAX_VIEW_ENTRIES);
+         let kept = || self.mirror.list().filter(|item| matcher.keeps(item));
+@@ -122,7 +145,7 @@ impl ViewContext<'_> {
+                 let shown = entries.len().min(left);
+                 left = left.saturating_sub(shown);
+                 let entries: Vec<Value> =
+-                    entries.iter().take(shown).map(|entry| entry.to_value(self)).collect();
++                    entries.iter().take(shown).map(|entry| entry.to_value(self, only)).collect();
+                 json!({"id": id, "entries": entries})
+             })
+             .collect();
+@@ -164,7 +187,7 @@ impl<'a> Entry<'a> {
+         Self { head: item, members: Vec::new() }
+     }
+ 
+-    fn to_value(&self, context: &ViewContext<'_>) -> Value {
++    fn to_value(&self, context: &ViewContext<'_>, only: Option<&HashSet<&str>>) -> Value {
+         let head = self.head;
+         // Unique across groups: a thread can head an entry in Today and
+         // another in Earlier, and open requests of one thread stay apart.
+@@ -172,10 +195,11 @@ impl<'a> Entry<'a> {
+             Some(thread) => format!("thread:{thread}:{}", head.id),
+             None => head.id.clone(),
+         };
+-        let members: Vec<Value> = self.members.iter().map(|item| context.item(item)).collect();
++        let members: Vec<Value> =
++            self.members.iter().map(|item| context.item_in(item, only)).collect();
+         json!({
+             "id": id,
+-            "item": context.item(head),
++            "item": context.item_in(head, only),
+             "members": members,
+             "unread": std::iter::once(head).chain(self.members.iter().copied()).filter(|item| item.is_unread()).count(),
+         })
+diff --git a/cmux-tui/crates/cmux-history/src/fold_agent.rs b/cmux-tui/crates/cmux-history/src/fold_agent.rs
+index 05ab38a1257..b284522d7ce 100644
+--- a/cmux-tui/crates/cmux-history/src/fold_agent.rs
++++ b/cmux-tui/crates/cmux-history/src/fold_agent.rs
+@@ -119,14 +119,19 @@ impl AgentSessionFold {
+ 
+     /// Applies records in journal order. A record the Swift decoder would
+     /// reject (no sequence or kind) is skipped without moving the cursor.
+-    pub fn apply(&mut self, records: &[Value]) {
++    /// True when a History row changed: a session came or went, or a field
++    /// its entry shows moved. A record that changes none (a turn of the same
++    /// time, a new terminal or tab subject) is folded and reports false, so
++    /// the host does not tell open History pages to re-read.
++    pub fn apply(&mut self, records: &[Value]) -> bool {
++        let mut changed = false;
+         for envelope in records.iter().filter_map(Envelope::parse) {
+             if envelope.sequence > self.cursor {
+-                self.apply_one(&envelope);
++                changed |= self.apply_one(&envelope);
+                 self.cursor = envelope.sequence;
+             }
+         }
+-        self.trim();
++        self.trim() || changed
+     }
+ 
+     /// Newest activity first; ties by session id, descending.
+@@ -184,45 +189,53 @@ impl AgentSessionFold {
+     /// One stamp of a coalesced activity row: a known session's last
+     /// activity moves forward. It never makes a session and never changes
+     /// when one started or ended.
+-    fn apply_activity_stamp(&mut self, stamp: &Value) {
++    /// True when it moved the session's last activity.
++    fn apply_activity_stamp(&mut self, stamp: &Value) -> bool {
+         let provider = string_at(Some(stamp), &["adapter"]);
+         let session_id = string_at(Some(stamp), &["agent_session_id"]);
+         let time =
+             string_at(Some(stamp), &["observed_at_ms"]).and_then(|text| text.parse::<i64>().ok());
+         let (Some(provider), Some(session_id), Some(time)) = (provider, session_id, time) else {
+-            return;
++            return false;
+         };
+-        if let Some(session) = self.sessions.get_mut(&format!("{provider}/{session_id}")) {
+-            session.last_activity_ms = session.last_activity_ms.max(time);
++        match self.sessions.get_mut(&format!("{provider}/{session_id}")) {
++            Some(session) if time > session.last_activity_ms => {
++                session.last_activity_ms = time;
++                true
++            }
++            _ => false,
+         }
+     }
+ 
+-    fn apply_one(&mut self, record: &Envelope<'_>) {
++    /// True when the record changed what the session's History row shows.
++    fn apply_one(&mut self, record: &Envelope<'_>) -> bool {
+         if !record.kind.starts_with("agent.") {
+-            return;
++            return false;
+         }
+         let Some(normalized) = record.payload.and_then(|payload| payload.get("normalized")) else {
+-            return;
++            return false;
+         };
+         if !normalized.is_object() {
+-            return;
++            return false;
+         }
+         // The daemon's coalesced activity row: report times of many
+         // sessions, no session of its own.
+         if let Some(stamps) = normalized.get("activity").and_then(Value::as_array) {
++            let mut changed = false;
+             for stamp in stamps {
+-                self.apply_activity_stamp(stamp);
++                changed |= self.apply_activity_stamp(stamp);
+             }
+-            return;
++            return changed;
+         }
+         let session_id = string_at(Some(normalized), &["agent_session_id"])
+             .or_else(|| string_at(Some(normalized), &["root_agent_session_id"]));
+         let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+-            return;
++            return false;
+         };
+         let provider = string_at(record.payload, &["adapter", "id"]).unwrap_or("agent");
+         let time = time_of(record, normalized);
+         let key = format!("{provider}/{session_id}");
++        let before = self.sessions.get(&key).map(Shown::of);
+         let session = self.sessions.entry(key).or_insert_with(|| AgentSession {
+             machine: self.machine.clone(),
+             provider: provider.to_owned(),
+@@ -261,11 +274,13 @@ impl AgentSessionFold {
+         if let Some(workspace) = record.subject("workspace") {
+             session.workspace = Some(workspace.to_owned());
+         }
++        before.as_ref() != Some(&Shown::of(session))
+     }
+ 
+-    fn trim(&mut self) {
++    /// True when it dropped a session.
++    fn trim(&mut self) -> bool {
+         if self.sessions.len() <= self.capacity {
+-            return;
++            return false;
+         }
+         let drop: Vec<String> = self
+             .ordered()
+@@ -276,6 +291,30 @@ impl AgentSessionFold {
+         for key in drop {
+             self.sessions.remove(&key);
+         }
++        true
++    }
++}
++
++/// What a session's History row shows of it ([`AgentSession::entry`]): its
++/// time, folder, workspace and whether it runs. The terminal, tab and start
++/// time are folded but shown nowhere, so a record that moves only those
++/// changes no row.
++#[derive(PartialEq, Eq)]
++struct Shown {
++    last_activity_ms: i64,
++    cwd: Option<String>,
++    workspace: Option<String>,
++    running: bool,
++}
++
++impl Shown {
++    fn of(session: &AgentSession) -> Self {
++        Self {
++            last_activity_ms: session.last_activity_ms,
++            cwd: session.cwd.clone(),
++            workspace: session.workspace.clone(),
++            running: session.ended_at_ms.is_none(),
++        }
+     }
+ }
+ 
+diff --git a/cmux-tui/crates/cmux-tui-cloud-conversations/src/lib.rs b/cmux-tui/crates/cmux-tui-cloud-conversations/src/lib.rs
+index a34d9efe0d3..a5dce971ce7 100644
+--- a/cmux-tui/crates/cmux-tui-cloud-conversations/src/lib.rs
++++ b/cmux-tui/crates/cmux-tui-cloud-conversations/src/lib.rs
+@@ -16,6 +16,7 @@ mod contract;
+ mod environments;
+ mod error;
+ mod host_replica;
++mod inbox_cache;
+ pub mod platform;
+ mod service;
+ mod session;
+diff --git a/cmux-tui/crates/cmux-tui-cloud-conversations/src/service.rs b/cmux-tui/crates/cmux-tui-cloud-conversations/src/service.rs
+index 571fbe35437..6b810501c29 100644
+--- a/cmux-tui/crates/cmux-tui-cloud-conversations/src/service.rs
++++ b/cmux-tui/crates/cmux-tui-cloud-conversations/src/service.rs
+@@ -16,6 +16,7 @@ use super::contract::{
+     mutation_data, read_body, read_value, requests_list_data, require_agent, require_conversation,
+     snapshot_data,
+ };
++use super::inbox_cache::InboxCache;
+ use super::session::{CloudSession, SessionParams};
+ use super::stream::{CloudEvent, StreamAction, StreamState};
+ use cmux_json::JsonSet as _;
+@@ -333,6 +334,9 @@ struct Inner {
+     /// set, nor an owner set newer than it. Taken before `subscriptions`; the
+     /// sink only queues the event.
+     presence_order: Mutex<()>,
++    /// The inbox as last read whole, kept from the stream (inbox_cache.rs).
++    /// A leaf lock: nothing is taken while it is held.
++    inbox: Mutex<InboxCache>,
+     /// The next [`Subscription::driver`].
+     next_driver: AtomicU64,
+ }
+@@ -386,6 +390,7 @@ impl CloudConversations {
+                 requests_in_flight: AtomicUsize::new(0),
+                 presence_order: Mutex::new(()),
+                 next_driver: AtomicU64::new(0),
++                inbox: Mutex::new(InboxCache::default()),
+             }),
+         }
+     }
+@@ -455,6 +460,7 @@ impl CloudConversations {
+             lease.app_held = false;
+             lease.generation += 1;
+         }
++        self.inner.inbox().forget();
+         self.inner.notify();
+         Ok(json!({"state": "signed_out"}))
+     }
+@@ -553,6 +559,31 @@ impl CloudConversations {
+         Ok(json!({"entries": entries, "revision": revision, "next_cursor": cursor}))
+     }
+ 
++    /// `home-inbox`'s Cloud entries with no Cloud read: the inbox the daemon
++    /// last read whole, with every entry the live inbox stream wrote since
++    /// (inbox_cache.rs). `None` when there is none to trust (no live stream
++    /// for the lease's account, or nothing read since it went live): the
++    /// caller then takes a request slot and calls [`Self::home_inbox_read`].
++    pub fn home_inbox_kept(&self) -> Option<Vec<Value>> {
++        let account = self.inner.lease_account();
++        self.inner.inbox().entries(account.as_deref())
++    }
++
++    /// `home-inbox`'s Cloud entries read from the network
++    /// ([`Self::inbox_list_all`]); a whole read is kept while the inbox
++    /// stream is live, so the next `home-inbox` reads nothing.
++    pub fn home_inbox_read(&self, budget: Duration) -> Result<Vec<Value>, CloudError> {
++        let account = self.inner.lease_account();
++        let start = self.inner.inbox().begin();
++        let all = self.inbox_list_all(false, budget)?;
++        let whole = all.get("next_cursor").is_none_or(Value::is_null);
++        let entries = all.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
++        if !whole {
++            return Ok(entries);
++        }
++        Ok(self.inner.inbox().finish(account.as_deref(), &start, entries))
++    }
++
+     fn inbox_page(
+         &self,
+         limit: u32,
+@@ -1182,7 +1213,12 @@ impl CloudConversations {
+ }
+ 
+ impl Inner {
++    fn inbox(&self) -> std::sync::MutexGuard<'_, InboxCache> {
++        self.inbox.lock().unwrap_or_else(PoisonError::into_inner)
++    }
++
+     fn emit(&self, event: CloudEvent) {
++        self.inbox().observe(&event);
+         let sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner).clone();
+         if let Some(sink) = sink {
+             sink(event);
+diff --git a/cmux-tui/crates/cmux-tui-core/src/conversation_store.rs b/cmux-tui/crates/cmux-tui-core/src/conversation_store.rs
+index 9cabdf6f37b..5de832b52c4 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/conversation_store.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/conversation_store.rs
+@@ -9,6 +9,7 @@
+ //! only after a method returns, so no event ever describes an uncommitted
+ //! write. Typing indicators are never stored.
+ 
++use std::collections::HashMap;
+ use std::path::Path;
+ use std::sync::{Arc, Mutex};
+ 
+@@ -128,6 +129,20 @@ pub(crate) struct ConversationStore {
+     connection: Connection,
+     /// Attachment bytes (`attachments/` beside the store) and uploads in flight.
+     attachments: attachments::Attachments,
++    /// Each conversation's summary as [`Self::list`] last built it, with the
++    /// head's stamp it was built at ([`SummaryStamp`]).
++    summaries: HashMap<String, (SummaryStamp, Summary)>,
++}
++
++/// What every committed change of a conversation moves: each op bumps `rev`
++/// (cmux_conversation::apply), an import bumps it too, and every write of
++/// the head goes through `write_head`. A summary built at the same stamp is
++/// the same summary.
++#[derive(Clone, PartialEq, Eq)]
++struct SummaryStamp {
++    rev: i64,
++    last_seq: i64,
++    updated_at: String,
+ }
+ 
+ impl std::fmt::Debug for ConversationStore {
+@@ -252,7 +267,7 @@ impl ConversationStore {
+             params![SCHEMA_VERSION.to_string()],
+         )?;
+         transaction.commit()?;
+-        Ok(Self { connection, attachments })
++        Ok(Self { connection, attachments, summaries: HashMap::new() })
+     }
+ 
+     /// Mints the credential of `participant` (an agent, or a person other than
+@@ -312,22 +327,50 @@ impl ConversationStore {
+         })
+     }
+ 
+-    /// Every conversation, newest `updated_at` first.
++    /// Every conversation, newest `updated_at` first. One query reads every
++    /// conversation's stamp; only a conversation whose stamp moved since the
++    /// last list is read again (its head, cursors, guards and last message).
++    /// Every `conversation-changed` makes the app list again (`home-inbox`),
++    /// and each list read every conversation at about five queries each.
+     pub(crate) fn list(&mut self) -> anyhow::Result<Vec<Summary>> {
+         let transaction = self.connection.transaction()?;
+-        let ids = {
+-            let mut statement = transaction
+-                .prepare("SELECT id FROM conversation ORDER BY updated_at DESC, id DESC")?;
++        let stamps = {
++            let mut statement = transaction.prepare_cached(
++                "SELECT id, rev, last_seq, updated_at FROM conversation
++                 ORDER BY updated_at DESC, id DESC",
++            )?;
+             statement
+-                .query_map([], |row| row.get::<_, String>(0))?
++                .query_map([], |row| {
++                    Ok((
++                        row.get::<_, String>(0)?,
++                        SummaryStamp {
++                            rev: row.get(1)?,
++                            last_seq: row.get(2)?,
++                            updated_at: row.get(3)?,
++                        },
++                    ))
++                })?
+                 .collect::<Result<Vec<_>, _>>()?
+         };
+-        let mut summaries = Vec::with_capacity(ids.len());
+-        for id in ids {
+-            let head = load_head(&transaction, &id)?.context("conversation vanished")?;
+-            let last = load_message_by_seq(&transaction, &id, head.last_seq)?;
+-            summaries.push(summary(&head, last.as_ref()));
++        let mut kept = HashMap::with_capacity(stamps.len());
++        let mut summaries = Vec::with_capacity(stamps.len());
++        for (id, stamp) in stamps {
++            let built = match self.summaries.remove(&id) {
++                Some((at, built)) if at == stamp => built,
++                _ => {
++                    #[cfg(test)]
++                    SUMMARY_READS.with(|reads| reads.set(reads.get() + 1));
++                    let head = load_head(&transaction, &id)?.context("conversation vanished")?;
++                    let last = load_message_by_seq(&transaction, &id, head.last_seq)?;
++                    summary(&head, last.as_ref())
++                }
++            };
++            summaries.push(built.clone());
++            kept.insert(id, (stamp, built));
+         }
++        transaction.commit()?;
++        // A conversation no longer listed leaves the cache with this list.
++        self.summaries = kept;
+         Ok(summaries)
+     }
+ 
+@@ -960,3 +1003,13 @@ pub(crate) struct ConversationHost {
+ #[cfg(test)]
+ #[path = "conversation_spill_tests.rs"]
+ mod spill_tests;
++
++#[cfg(test)]
++thread_local! {
++    /// Conversations [`ConversationStore::list`] read again on this thread.
++    static SUMMARY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
++}
++
++#[cfg(test)]
++#[path = "conversation_list_tests.rs"]
++mod list_tests;
+diff --git a/cmux-tui/crates/cmux-tui-core/src/feed_client.rs b/cmux-tui/crates/cmux-tui-core/src/feed_client.rs
+index 9c3d95352e6..ed53e4f2326 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/feed_client.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/feed_client.rs
+@@ -77,8 +77,12 @@ pub type ReplySender = Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
+ /// while the feed's is held.
+ pub type Places = Box<dyn Fn(&FeedItem) -> Option<Place> + Send>;
+ 
+-/// Snapshots the daemon's store into a [`Places`] lookup for one read.
+-pub type PlaceResolver = Arc<dyn Fn() -> Places + Send + Sync>;
++/// Snapshots the daemon's store into a [`Places`] lookup for one read:
++/// `None` for a read that may name any item (one pass over the tabs),
++/// `Some(items)` for a read that names only these (a delta read, a
++/// `feed.item.get`): each costs a few map lookups, and no pass over the
++/// tabs runs.
++pub type PlaceResolver = Arc<dyn Fn(Option<&[FeedItem]>) -> Places + Send + Sync>;
+ 
+ /// What the client reads from its host.
+ pub struct FeedDeps {
+@@ -362,7 +366,11 @@ impl FeedClient {
+     pub fn view(&self, request: &ViewRequest) -> Value {
+         self.ensure_started();
+         let now = self.inner.now();
+-        let places = self.places(true);
++        // A delta read names only the items it asks for in full.
++        let places = match &request.only {
++            Some(ids) => self.places_of(ids),
++            None => self.places(true),
++        };
+         let mut state = self.inner.lock();
+         // A snooze that ended shows again with this read.
+         let woke: Vec<FeedEvent> = state.mirror.tick(now).into_iter().map(view_event).collect();
+@@ -375,7 +383,19 @@ impl FeedClient {
+     /// The store's place lookup for one read (none when the read shows no
+     /// rows). Taken before the feed state lock.
+     fn places(&self, rows: bool) -> Places {
+-        if rows { (self.inner.deps.place)() } else { Box::new(|_| None) }
++        if rows { (self.inner.deps.place)(None) } else { Box::new(|_| None) }
++    }
++
++    /// The place lookup of a read that names only `ids`: their items are
++    /// copied under a short feed lock, then named with no feed lock held,
++    /// so the read costs a few lookups per item and no pass over the tabs.
++    /// An item that changed between the two locks keeps the place it had.
++    fn places_of(&self, ids: &[String]) -> Places {
++        let items: Vec<FeedItem> = {
++            let state = self.inner.lock();
++            ids.iter().filter_map(|id| state.mirror.visible(id).cloned()).collect()
++        };
++        (self.inner.deps.place)(Some(&items))
+     }
+ 
+     fn context<T>(
+@@ -411,7 +431,7 @@ impl FeedClient {
+     pub fn items(&self, ids: &[String], confirmed: bool) -> Vec<Value> {
+         self.ensure_started();
+         let now = self.inner.now();
+-        let places = self.places(!confirmed);
++        let places = if confirmed { self.places(false) } else { self.places_of(ids) };
+         let state = self.inner.lock();
+         self.context(&state, now, &places, |context| {
+             ids.iter()
+diff --git a/cmux-tui/crates/cmux-tui-core/src/feed_client/tests.rs b/cmux-tui/crates/cmux-tui-core/src/feed_client/tests.rs
+index df756abd11c..1eadb8fe0c2 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/feed_client/tests.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/feed_client/tests.rs
+@@ -95,7 +95,7 @@ fn harness(cloud: Option<CloudConversations>) -> Harness {
+             sink.lock().unwrap_or_else(PoisonError::into_inner).push(event);
+         }),
+         now_ms: Arc::new(|| NOW),
+-        place: Arc::new(|| Box::new(|_| None)),
++        place: Arc::new(|_| Box::new(|_| None)),
+     });
+     Harness { feed, events, gh, mailbox }
+ }
+diff --git a/cmux-tui/crates/cmux-tui-core/src/history_ops/commands.rs b/cmux-tui/crates/cmux-tui-core/src/history_ops/commands.rs
+index 0c969266269..1ff5dbb386a 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/history_ops/commands.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/history_ops/commands.rs
+@@ -11,7 +11,9 @@ use cmux_history::{HistoryEntry, HistoryKind};
+ 
+ use super::merged::LOCAL_MACHINE;
+ use crate::Mux;
+-use crate::state::command_history_store::{CommandDeletion, MAX_COMMAND_LIST_LIMIT};
++use crate::state::command_history_store::{
++    CommandDeletion, MAX_COMMAND_LIST_LIMIT, terminal_command_rows,
++};
+ use crate::workspace_registry::unix_epoch_ms;
+ 
+ pub(super) enum Selection {
+@@ -33,17 +35,24 @@ pub(super) fn ids(ids: &[&str]) -> Vec<u64> {
+     ids.iter().filter_map(|id| row_id(id)).collect()
+ }
+ 
+-/// The newest unexpired rows (at most the store's page) as entries.
++/// The newest unexpired rows (at most the store's page) as entries. Read on
++/// one of the registry's committed readers, so a History read (up to 1,000
++/// rows, once per page change) never holds the registry lock every state
++/// commit takes; an in-memory registry has none and reads under the lock.
+ pub(super) fn entries(mux: &Mux) -> anyhow::Result<Vec<HistoryEntry>> {
+     let limit = MAX_COMMAND_LIST_LIMIT;
+     let now = unix_epoch_ms()?;
+-    let page = mux
+-        .workspace_registry
+-        .lock()
+-        .unwrap_or_else(PoisonError::into_inner)
+-        .list_terminal_commands(None, limit, now)?;
+-    Ok(page
+-        .commands
++    let read = |connection: &rusqlite::Connection| {
++        terminal_command_rows(connection, None, limit, now).map(|rows| rows.commands)
++    };
++    let commands = match mux.registry_connection.read_committed(read) {
++        Some(commands) => commands?,
++        None => {
++            let registry = mux.workspace_registry.lock().unwrap_or_else(PoisonError::into_inner);
++            registry.list_terminal_commands(None, limit, now)?.commands
++        }
++    };
++    Ok(commands
+         .iter()
+         .map(|row| {
+             let at_ms = i64::try_from(row.started_at_ms).unwrap_or(i64::MAX);
+diff --git a/cmux-tui/crates/cmux-tui-core/src/history_ops/merged.rs b/cmux-tui/crates/cmux-tui-core/src/history_ops/merged.rs
+index 94a3be888da..b201ea400b8 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/history_ops/merged.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/history_ops/merged.rs
+@@ -255,9 +255,15 @@ impl HistoryHost {
+         let agents = pick(HistoryKind::Agent);
+         let mut changed = Vec::new();
+         if !agents.is_empty() {
+-            state.agents.apply(&agents);
++            // The fold's cursor moves with every record (the save keeps it);
++            // only a record that changed a row tells open pages to re-read.
++            // Most `agent.*` records (turns, state changes of a session whose
++            // row shows the same time, folder and run state) change none.
++            let rows_changed = state.agents.apply(&agents);
+             state.unsaved_agents = true;
+-            changed.push(HistoryKind::Agent);
++            if rows_changed {
++                changed.push(HistoryKind::Agent);
++            }
+         }
+         // Closed items live in the closed-history store; a record that
+         // changed one only marks the kind (an open History page re-reads).
+diff --git a/cmux-tui/crates/cmux-tui-core/src/server/conversations.rs b/cmux-tui/crates/cmux-tui-core/src/server/conversations.rs
+index b03a9ed5066..3a4e572c485 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/server/conversations.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/server/conversations.rs
+@@ -391,20 +391,23 @@ fn cloud_home_rows(mux: &Mux, client: u64) -> (Vec<cmux_conversation::HomeRow>,
+     if !super::cloud_conversations::is_person(mux, client) {
+         return (Vec::new(), "signed_out");
+     }
+-    // The read holds one of the Cloud's request slots, as cloud-inbox-list does.
++    // The inbox as last read whole, kept from the live inbox stream's
++    // entries: a `cloud-inbox-changed` (which the app answers with this
++    // read) costs no Cloud page. Without one, the read holds one of the
++    // Cloud's request slots, as cloud-inbox-list does.
+     let listed = super::cloud_conversations::lease_user(mux, client).and_then(|service| {
++        if let Some(entries) = service.home_inbox_kept() {
++            return Ok(entries);
++        }
+         let _permit = service.begin_request()?;
+         service
+-            .inbox_list_all(false, crate::cloud_conversations::INBOX_ALL_BUDGET)
++            .home_inbox_read(crate::cloud_conversations::INBOX_ALL_BUDGET)
+             .map_err(anyhow::Error::from)
+     });
+-    let value = match listed {
+-        Ok(value) => value,
++    let entries = match listed {
++        Ok(entries) => entries,
+         Err(error) => return (Vec::new(), cloud_rows_failure(&error)),
+     };
+-    let Some(entries) = value.get("entries").and_then(Value::as_array) else {
+-        return (Vec::new(), "unavailable");
+-    };
+     let now_ms = std::time::SystemTime::now()
+         .duration_since(std::time::UNIX_EPOCH)
+         .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+diff --git a/cmux-tui/crates/cmux-tui-core/src/server/feed_client_ops.rs b/cmux-tui/crates/cmux-tui-core/src/server/feed_client_ops.rs
+index 1a003764a09..4a0a63ac3bb 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/server/feed_client_ops.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/server/feed_client_ops.rs
+@@ -318,8 +318,11 @@ impl Mux {
+                         .duration_since(std::time::UNIX_EPOCH)
+                         .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+                 }),
+-                place: Arc::new(move || match place_mux.upgrade() {
+-                    Some(mux) => mux.feed_places(),
++                place: Arc::new(move |items| match place_mux.upgrade() {
++                    Some(mux) => match items {
++                        Some(items) => mux.feed_places_of(items),
++                        None => mux.feed_places(),
++                    },
+                     None => Box::new(|_| None),
+                 }),
+             });
+diff --git a/cmux-tui/crates/cmux-tui-core/src/server/feed_places.rs b/cmux-tui/crates/cmux-tui-core/src/server/feed_places.rs
+index cc2fb0c5573..b71de6d27ed 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/server/feed_places.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/server/feed_places.rs
+@@ -23,10 +23,10 @@ use std::sync::Arc;
+ use cmux_feed_core::client::{FeedItem, Place};
+ 
+ use super::Mux;
+-use crate::Surface;
+ use crate::feed_client::Places;
+-use crate::resource::ContentPublicId;
++use crate::resource::{BrowserPublicId, ContentPublicId, TabPublicId, TerminalPublicId};
+ use crate::state::conversation_tabs_store::ConversationTabRecord;
++use crate::{Surface, SurfaceId};
+ 
+ /// One tab as a row names it.
+ struct TabPlace {
+@@ -81,6 +81,10 @@ fn tab_title(surface: &Surface) -> String {
+     surface.name().filter(|name| !name.is_empty()).unwrap_or_else(|| surface.title())
+ }
+ 
++/// Where one item's tab is, as the whole index would order it: the first by
++/// workspace position, then by surface id.
++type TabHit = (Option<usize>, SurfaceId);
++
+ impl Mux {
+     /// The feed client's per-read place lookup (module docs).
+     pub(super) fn feed_places(&self) -> Places {
+@@ -88,7 +92,130 @@ impl Mux {
+         Box::new(move |item| index.place(item))
+     }
+ 
++    /// The place lookup of a read that names only `items` (a delta
++    /// `feed.view.read`, a `feed.item.get`): each item's ids are looked up
++    /// in the store's own id maps, so the read costs a few lookups per item
++    /// and never the pass over every tab (~1,600 on Leo's Mac) that
++    /// [`Self::place_index`] makes. It names the same tab and workspace as
++    /// the index (feed_places_tests.rs `point_lookups_name_what_the_index_names`).
++    pub(super) fn feed_places_of(&self, items: &[FeedItem]) -> Places {
++        let presentation = self.presentation_snapshot();
++        // The agent chat tabs bound to each session an item names, from the
++        // presentation snapshot (no store lock).
++        let bound = |session: &str| -> Vec<BrowserPublicId> {
++            presentation
++                .conversation_tabs
++                .iter()
++                .filter(|(_, record)| {
++                    matches!(record, ConversationTabRecord::AgentSession { session: Some(of), .. } if of == session)
++                })
++                .filter_map(|(browser, _)| BrowserPublicId::parse(browser.as_str()).ok())
++                .collect()
++        };
++        let sessions: Vec<Vec<BrowserPublicId>> = items
++            .iter()
++            .map(|item| item.context_str("acp_session").map(bound).unwrap_or_default())
++            .collect();
++        // Ids only under `state`, as in `place_index`; names after it.
++        type Found = (Option<(Arc<Surface>, Option<usize>)>, Option<(usize, String)>);
++        let found: Vec<Found> = self.with_state(|state| {
++            let tabbed = |surface: SurfaceId| -> Option<TabHit> {
++                state.resource_indexes.tab_ids.get(&surface)?;
++                state.surfaces.get(&surface)?;
++                let workspace = state
++                    .pane_of(surface)
++                    .and_then(|pane| state.screen_of(pane))
++                    .map(|(workspace, _)| workspace);
++                Some((workspace, surface))
++            };
++            let first = |surfaces: &[SurfaceId]| -> Option<TabHit> {
++                surfaces.iter().filter_map(|surface| tabbed(*surface)).min()
++            };
++            let placements = |content: ContentPublicId| -> Option<TabHit> {
++                first(state.resource_indexes.content_placements.get(&content)?)
++            };
++            let display = |position: usize| -> Option<(usize, String)> {
++                let workspace = state.workspaces.get(position)?;
++                let name = presentation
++                    .workspaces
++                    .get(&workspace.key)
++                    .and_then(|record| record.title.clone())
++                    .filter(|title| !title.is_empty())
++                    .unwrap_or_else(|| workspace.name.clone());
++                Some((position, name))
++            };
++            items
++                .iter()
++                .zip(&sessions)
++                .map(|(item, browsers)| {
++                    let by_tab = item.context_str("tab").and_then(|id| {
++                        let surface = match TabPublicId::parse(id) {
++                            Ok(tab) => state.resource_indexes.tabs.get(&tab).copied(),
++                            Err(_) => id.parse::<SurfaceId>().ok(),
++                        };
++                        tabbed(surface?)
++                    });
++                    let by_terminal = || {
++                        let terminal =
++                            TerminalPublicId::parse(item.context_str("terminal")?).ok()?;
++                        placements(ContentPublicId::Terminal(terminal))
++                    };
++                    let by_session = || {
++                        browsers
++                            .iter()
++                            .filter_map(|browser| {
++                                placements(ContentPublicId::Browser(browser.clone()))
++                            })
++                            .min()
++                    };
++                    let tab = by_tab.or_else(by_terminal).or_else(by_session);
++                    let workspace = tab.and_then(|(workspace, _)| workspace).or_else(|| {
++                        let id = item.context_str("workspace")?;
++                        state.workspaces.iter().position(|workspace| {
++                            workspace.public_id.as_str() == id || workspace.id.to_string() == id
++                        })
++                    });
++                    let surface = tab.and_then(|(workspace, surface)| {
++                        Some((Arc::clone(state.surfaces.get(&surface)?), workspace))
++                    });
++                    (surface, workspace.and_then(display))
++                })
++                .collect()
++        });
++        let places: HashMap<String, Place> = items
++            .iter()
++            .zip(found)
++            .filter_map(|(item, (tab, workspace))| {
++                if tab.is_none() && workspace.is_none() {
++                    return None;
++                }
++                let harness = tab.as_ref().and_then(|(surface, _)| {
++                    let Some(ContentPublicId::Browser(browser)) =
++                        surface.resource_identity().map(|identity| &identity.content_id)
++                    else {
++                        return None;
++                    };
++                    match presentation.conversation_tabs.get(browser.as_str()) {
++                        Some(ConversationTabRecord::AgentSession { harness, .. }) => {
++                            harness.clone()
++                        }
++                        _ => None,
++                    }
++                });
++                let place = Place::with_harness(
++                    harness.as_deref(),
++                    workspace.map(|(_, name)| name),
++                    tab.map(|(surface, _)| tab_title(&surface)),
++                );
++                Some((item.id.clone(), place))
++            })
++            .collect();
++        Box::new(move |item| places.get(&item.id).cloned())
++    }
++
+     pub(crate) fn place_index(&self) -> PlaceIndex {
++        #[cfg(test)]
++        INDEX_BUILDS.with(|builds| builds.set(builds.get() + 1));
+         let presentation = self.presentation_snapshot();
+         let mut index = PlaceIndex::default();
+         // Ids only under `state`; surface names and titles take their own
+@@ -156,6 +283,12 @@ impl Mux {
+     }
+ }
+ 
++#[cfg(test)]
++thread_local! {
++    /// Whole place indexes this thread built ([`Mux::place_index`]).
++    static INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
++}
++
+ #[cfg(test)]
+ #[path = "feed_places_tests.rs"]
+ mod tests;
+diff --git a/cmux-tui/crates/cmux-tui-core/src/server/feed_places_tests.rs b/cmux-tui/crates/cmux-tui-core/src/server/feed_places_tests.rs
+index 31e10c66ca7..951ef623ed1 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/server/feed_places_tests.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/server/feed_places_tests.rs
+@@ -103,3 +103,61 @@ fn unknown_ids_name_nothing_and_the_row_names_the_poster() {
+     assert_eq!(row(&mux, context), (Some("api-hook".to_owned()), None));
+     mux.shutdown();
+ }
++
++/// The point lookups of a delta read (`feed_places_of`) name the same tab,
++/// workspace and agent as the whole index, for every way an item names them.
++#[test]
++fn point_lookups_name_what_the_index_names() {
++    let mux = Mux::new_for_test("feed-places-point", crate::SurfaceOptions::default());
++    let (surface, pane, workspace, tab, term) = named_terminal(&mux);
++    run(
++        &mux,
++        json!({"cmd":"new-conversation-tab","pane":pane,
++               "agent_session":{"host":"install:mac-test","session":"sess-point","harness":"claude"}}),
++    )
++    .unwrap();
++    let contexts = [
++        json!({"terminal": term}),
++        json!({"tab": tab}),
++        json!({"tab": surface.to_string()}),
++        json!({"workspace": workspace}),
++        json!({"workspace": "ws_unknown", "terminal": term}),
++        json!({"acp_session": "sess-point"}),
++        json!({"acp_session": "sess-elsewhere"}),
++        json!({"tab": "tab_00000000000000000000000000000000", "terminal": term}),
++        json!({"tab": "tab_00000000000000000000000000000000"}),
++    ];
++    let whole = mux.feed_places();
++    for context in contexts {
++        let item = item(context.clone());
++        let point = mux.feed_places_of(std::slice::from_ref(&item));
++        assert_eq!(point(&item), whole(&item), "{context}");
++    }
++    mux.shutdown();
++}
++
++/// Detector (audit 2026-11-18 §15): a delta `feed.view.read` (`only`, the
++/// ids a `feed-view-changed` carries) names only those items, with no pass
++/// over every tab; a whole read makes one.
++#[test]
++fn a_delta_view_read_makes_no_pass_over_the_tabs() {
++    let mux = Mux::new_for_test("feed-places-delta", crate::SurfaceOptions::default());
++    let (_, _, _, _, term) = named_terminal(&mux);
++    let feed = mux.feed_client();
++    let posted = feed.post(item(json!({"terminal": term})));
++    let read = |request: Value| {
++        super::INDEX_BUILDS.with(|builds| builds.set(0));
++        let view = feed.view(&serde_json::from_value(request).unwrap());
++        (view, super::INDEX_BUILDS.with(std::cell::Cell::get))
++    };
++    let (_, whole) = read(json!({"layout": "list"}));
++    assert_eq!(whole, 1, "a whole read builds the index once");
++    let (view, delta) = read(json!({"layout": "list", "only": [posted.id]}));
++    assert_eq!(delta, 0, "a delta read built the whole place index");
++    let entry = &view["groups"][1]["entries"][0]["item"];
++    assert_eq!(entry["row"]["where"], "api › server", "{view}");
++    let (view, _) = read(json!({"layout": "list", "only": []}));
++    assert_eq!(view["groups"][1]["entries"][0]["item"], json!({"id": posted.id, "same": true}));
++    feed.shutdown();
++    mux.shutdown();
++}
+diff --git a/cmux-tui/crates/cmux-tui-core/src/state/command_history_store.rs b/cmux-tui/crates/cmux-tui-core/src/state/command_history_store.rs
+index 0f355c5a0fa..86597ea3deb 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/state/command_history_store.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/state/command_history_store.rs
+@@ -118,13 +118,73 @@ fn to_u64(value: i64) -> u64 {
+     u64::try_from(value).unwrap_or(0)
+ }
+ 
++/// The retention in days stored on `connection` ([`DEFAULT_COMMAND_RETENTION_DAYS`] until set).
++fn retention_days(connection: &rusqlite::Connection) -> anyhow::Result<u32> {
++    Ok(meta_value(connection, RETENTION_KEY)?
++        .and_then(|value| value.parse::<u32>().ok())
++        .filter(|days| (1..=MAX_COMMAND_RETENTION_DAYS).contains(days))
++        .unwrap_or(DEFAULT_COMMAND_RETENTION_DAYS))
++}
++
++/// One read of [`terminal_command_rows`].
++pub(crate) struct TerminalCommandRows {
++    pub(crate) commands: Vec<CommandHistoryRow>,
++    /// Older rows were left out.
++    pub(crate) truncated: bool,
++    pub(crate) retention_days: u32,
++}
++
++/// The newest `limit` unexpired rows with an id above `after_id`, oldest
++/// first, read on any connection to the registry: the registry's own (under
++/// its lock) or one of its committed readers, which takes no registry lock
++/// (the History page's command rows, `history.entries.list`).
++pub(crate) fn terminal_command_rows(
++    connection: &rusqlite::Connection,
++    after_id: Option<u64>,
++    limit: usize,
++    now_ms: u64,
++) -> anyhow::Result<TerminalCommandRows> {
++    anyhow::ensure!(
++        (1..=MAX_COMMAND_LIST_LIMIT).contains(&limit),
++        "bad request: limit must be 1...{MAX_COMMAND_LIST_LIMIT}"
++    );
++    let retention_days = retention_days(connection)?;
++    let cutoff = expiry_cutoff(retention_days, now_ms);
++    let after = to_i64(after_id.unwrap_or(0));
++    let mut statement = connection.prepare(
++        "SELECT id, terminal_id, command, cwd, exit_code, started_at_ms, duration_ms
++         FROM (
++           SELECT * FROM terminal_commands
++           WHERE id > ?1 AND (?3 IS NULL OR started_at_ms > ?3)
++           ORDER BY id DESC LIMIT ?2
++         )
++         ORDER BY id ASC",
++    )?;
++    // One more than asked, to tell whether older rows were left out.
++    let mut commands = statement
++        .query_map(params![after, to_i64(limit as u64 + 1), cutoff.map(to_i64)], |row| {
++            Ok(CommandHistoryRow {
++                id: to_u64(row.get(0)?),
++                terminal_id: row.get(1)?,
++                command: row.get(2)?,
++                cwd: row.get(3)?,
++                exit_code: row.get(4)?,
++                started_at_ms: to_u64(row.get(5)?),
++                duration_ms: to_u64(row.get(6)?),
++            })
++        })?
++        .collect::<Result<Vec<_>, _>>()?;
++    let truncated = commands.len() > limit;
++    if truncated {
++        commands.remove(0);
++    }
++    Ok(TerminalCommandRows { commands, truncated, retention_days })
++}
++
+ impl WorkspaceRegistry {
+     /// The retention in days ([`DEFAULT_COMMAND_RETENTION_DAYS`] until set).
+     pub(crate) fn terminal_command_retention_days(&self) -> anyhow::Result<u32> {
+-        Ok(meta_value(&self.connection.get(), RETENTION_KEY)?
+-            .and_then(|value| value.parse::<u32>().ok())
+-            .filter(|days| (1..=MAX_COMMAND_RETENTION_DAYS).contains(days))
+-            .unwrap_or(DEFAULT_COMMAND_RETENTION_DAYS))
++        retention_days(&self.connection.get())
+     }
+ 
+     /// Stores the retention. Lists hide what it expires at once; the worker
+@@ -182,41 +242,8 @@ impl WorkspaceRegistry {
+         limit: usize,
+         now_ms: u64,
+     ) -> anyhow::Result<CommandHistoryPage> {
+-        anyhow::ensure!(
+-            (1..=MAX_COMMAND_LIST_LIMIT).contains(&limit),
+-            "bad request: limit must be 1...{MAX_COMMAND_LIST_LIMIT}"
+-        );
+-        let retention_days = self.terminal_command_retention_days()?;
+-        let cutoff = expiry_cutoff(retention_days, now_ms);
+-        let after = to_i64(after_id.unwrap_or(0));
+-        let db = self.connection.get();
+-        let mut statement = db.prepare(
+-            "SELECT id, terminal_id, command, cwd, exit_code, started_at_ms, duration_ms
+-             FROM (
+-               SELECT * FROM terminal_commands
+-               WHERE id > ?1 AND (?3 IS NULL OR started_at_ms > ?3)
+-               ORDER BY id DESC LIMIT ?2
+-             )
+-             ORDER BY id ASC",
+-        )?;
+-        // One more than asked, to tell whether older rows were left out.
+-        let mut commands = statement
+-            .query_map(params![after, to_i64(limit as u64 + 1), cutoff.map(to_i64)], |row| {
+-                Ok(CommandHistoryRow {
+-                    id: to_u64(row.get(0)?),
+-                    terminal_id: row.get(1)?,
+-                    command: row.get(2)?,
+-                    cwd: row.get(3)?,
+-                    exit_code: row.get(4)?,
+-                    started_at_ms: to_u64(row.get(5)?),
+-                    duration_ms: to_u64(row.get(6)?),
+-                })
+-            })?
+-            .collect::<Result<Vec<_>, _>>()?;
+-        let truncated = commands.len() > limit;
+-        if truncated {
+-            commands.remove(0);
+-        }
++        let TerminalCommandRows { commands, truncated, retention_days } =
++            terminal_command_rows(&self.connection.get(), after_id, limit, now_ms)?;
+         Ok(CommandHistoryPage {
+             commands,
+             truncated,
