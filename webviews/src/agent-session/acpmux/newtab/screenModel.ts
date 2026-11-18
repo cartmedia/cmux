@@ -724,7 +724,7 @@ export function recentChatCards(
     }));
   const cards = [...live, ...fill];
   if (!fold) return cards;
-  const children = indexChildren(sessions, device, now, t);
+  const children = indexChildren(sessions, device, now, t, cardParents(cards));
   return cards.map((card) => withChildren(card, children));
 }
 
@@ -780,21 +780,40 @@ function sessionCard(session: AcpmuxSessionEntry, now: number, t: Translate): Ch
 /// Child rows indexed once per snapshot, so each visible card does not rescan every session.
 type ChildCard = { parent: string; at: number; card: ChatCard };
 
+/// The ids a shown card's children name as their parent (`withChildren` reads both).
+function cardParents(cards: readonly ChatCard[]): Set<string> {
+  const parents = new Set<string>();
+  for (const card of cards) {
+    parents.add(card.sessionId);
+    if (card.chatKey) parents.add(card.chatKey);
+  }
+  return parents;
+}
+
+/// Only the children of the cards shown get a card: at Leo's scale a quarter of 10K chats were
+/// started by another, and every New Tab page built a card for each on every change of any chat
+/// (bench/session-scale-typing.bench.ts).
 function indexChildren(
   sessions: AcpmuxSnapshot["sessions"],
   device: DeviceChat[],
   now: number,
   t: Translate,
+  parents: ReadonlySet<string>,
 ): Map<string, ChildCard[]> {
   const indexed = new Map<string, ChildCard[]>();
+  const add = (child: ChildCard) => {
+    const list = indexed.get(child.parent);
+    if (list) list.push(child);
+    else indexed.set(child.parent, [child]);
+  };
   for (const raw of sessions) {
     const session = normalizedSessionEntry(raw as Parameters<typeof normalizedSessionEntry>[0]);
-    if (!session.spawnedBy || !listed(session) || sessionMark(session, false) === "input") continue;
-    const child = { parent: session.spawnedBy, at: activityTime(session) ?? 0, card: sessionCard(session, now, t) };
-    indexed.set(session.spawnedBy, [...(indexed.get(session.spawnedBy) ?? []), child]);
+    if (!session.spawnedBy || !parents.has(session.spawnedBy) || !listed(session)) continue;
+    if (sessionMark(session, false) === "input") continue;
+    add({ parent: session.spawnedBy, at: activityTime(session) ?? 0, card: sessionCard(session, now, t) });
   }
   for (const chat of device) {
-    if (!chat.parent) continue;
+    if (!chat.parent || !parents.has(chat.parent)) continue;
     const child = {
       parent: chat.parent,
       at: chat.updatedAt,
@@ -808,7 +827,7 @@ function indexChildren(
         state: "idle",
       } satisfies ChatCard,
     };
-    indexed.set(chat.parent, [...(indexed.get(chat.parent) ?? []), child]);
+    add(child);
   }
   return indexed;
 }
