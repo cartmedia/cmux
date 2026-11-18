@@ -78,9 +78,8 @@ function morphCardHeight(cardElement: HTMLElement, from: number, to: number, tim
   if (hidden > -1 || !(to > 0)) return;
   const stretch = from / to;
   const top = cardElement.getBoundingClientRect().top;
-  const children = Array.from(cardElement.children).filter(
-    (child): child is HTMLElement => child instanceof HTMLElement,
-  );
+  const children: HTMLElement[] = [];
+  for (const child of Array.from(cardElement.children)) if (child instanceof HTMLElement) children.push(child);
   // Every child's offset is read before anything scales.
   const offsets = children.map((child) => child.getBoundingClientRect().top - top);
   cardElement.animate(
