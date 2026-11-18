@@ -554,9 +554,7 @@ async function measured(
     layoutShift,
     shifts,
     ...(action !== "scroll" ? { boxShift: boxShift.score, boxMoves: boxShift.moves } : {}),
-    ...(boxShift.motion
-      ? { undeclared: boxShift.motion.undeclared, undeclaredMoves: boxShift.motion.moves }
-      : {}),
+    ...(boxShift.motion ? { undeclared: boxShift.motion.undeclared, undeclaredMoves: boxShift.motion.moves } : {}),
     longFrames,
     ...(longFrameParts.length ? { longFrameParts } : {}),
     frameSource: loafSupported ? ("long-animation-frame" as const) : ("raf" as const),

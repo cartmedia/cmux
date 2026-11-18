@@ -38,7 +38,8 @@ function turn(index: number, minutes: number): AcpmuxRow[] {
   ];
 }
 
-const finished = () => chat(Array.from({ length: 8 }, (_, index) => turn(index + 1, 60 - index * 6)).flat(), { harness: "codex" });
+const finished = () =>
+  chat(Array.from({ length: 8 }, (_, index) => turn(index + 1, 60 - index * 6)).flat(), { harness: "codex" });
 const SCROLLER = { selector: ".acpmux-scroll" };
 const atLatest = async (ctx: PlayContext) => {
   await ctx.waitFor(() => ctx.document.querySelector('[data-row-id="motion-8-summary"]'));
@@ -73,15 +74,13 @@ const settleFrames = (ctx: PlayContext, frames: number) => {
   });
 };
 
-
 /** Logs `frames` painted frames from now as `motion-trace` console lines: the scroller and the last turns' rows,
  *  where they drew. Read only when the runner echoes them (CMUX_GALLERY_ECHO_TRACE=1, undeclared-run.sh). */
 const trace = (ctx: PlayContext, label: string, frames = 24) => {
   const doc = ctx.document;
   const view = doc.defaultView!;
-  const started = view.performance.now();
   let frame = 0;
-  const tick = () => {
+  const log = (when: string) => {
     const scroller = doc.querySelector<HTMLElement>(".acpmux-scroll");
     const rows = [...doc.querySelectorAll<HTMLElement>("[data-row-id]")]
       .filter((row) => /motion-(7|8)-/.test(row.dataset.rowId ?? ""))
@@ -90,10 +89,20 @@ const trace = (ctx: PlayContext, label: string, frames = 24) => {
         return `${row.dataset.rowId}:${box.top.toFixed(1)}/${box.height.toFixed(1)}`;
       });
     console.log(
-      `motion-trace ${label} f${frame} t${(view.performance.now() - started).toFixed(0)} w${scroller?.clientWidth} st${scroller?.scrollTop.toFixed(1)} sh${scroller?.scrollHeight} ${rows.join(" ")}`,
+      `motion-trace ${label} f${frame}${when} t${view.performance.now().toFixed(0)} w${scroller?.clientWidth} st${scroller?.scrollTop.toFixed(1)} sh${scroller?.scrollHeight} ${rows.join(" ")}`,
     );
+  };
+  // Each frame twice: in its callback (before its layout and ResizeObserver passes) and once it has drawn.
+  const drawn = new MessageChannel();
+  drawn.port1.onmessage = () => {
+    log("d");
     frame += 1;
     if (frame < frames) view.requestAnimationFrame(tick);
+    else drawn.port1.close();
+  };
+  const tick = () => {
+    log("r");
+    drawn.port2.postMessage(0);
   };
   tick();
 };
@@ -116,11 +125,13 @@ export default agentPaneEntry({
   checks: {
     longFrameFailMs: {
       value: 250,
-      reason: "This entry judges layout moves; opening and switching seeded chats on the mock daemon takes long frames the open benches own.",
+      reason:
+        "This entry judges layout moves; opening and switching seeded chats on the mock daemon takes long frames the open benches own.",
     },
     layoutShiftMax: {
       value: 1,
-      reason: "This entry is judged by the layout-motion contract (undeclared moves, gallery health), not the per-step CLS limit.",
+      reason:
+        "This entry is judged by the layout-motion contract (undeclared moves, gallery health), not the per-step CLS limit.",
     },
   },
   variants: {
@@ -186,6 +197,7 @@ export default agentPaneEntry({
       play: async (ctx) => {
         await atLatest(ctx);
         setVisible(ctx, false);
+        (ctx.document.defaultView as unknown as { cmuxMotionTrace?: boolean }).cmuxMotionTrace = true;
         trace(ctx, "tab-520", 40);
         await ctx.resize(520);
         setVisible(ctx, true);
