@@ -238,9 +238,12 @@ export class AcpmuxPerf {
         const frame = performance.now();
         sample.tick = tick - start;
         sample.ahead = frame - tick;
+        // A trace's handle on the key's frame callback and its paint (bench/keyFrameTrace.ts).
+        performance.mark?.("acpmux:key-frame");
         page.removeEventListener("input", input, { capture: true });
         const channel = new MessageChannel();
         channel.port1.onmessage = () => {
+          performance.mark?.("acpmux:key-paint");
           sample.frame = frame - start;
           sample.paint = performance.now() - start;
           this.typing.push(sample);
