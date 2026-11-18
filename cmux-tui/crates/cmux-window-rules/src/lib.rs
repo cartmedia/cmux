@@ -29,6 +29,8 @@
 //!   tab a verb reads, the trail walks, the SSH machine an action names, a
 //!   page fit, Picture in Picture's page, where a file or diff opens, the
 //!   appearance verbs).
+//! - [`editors`]: the code editors a folder opens in (Open in Editor, Open In ▸) and which is
+//!   the default.
 //! - [`launch`]: whether the launch snapshot drawn before the daemon answered
 //!   is that daemon's, or stale (the launch then goes on as a bare one), and
 //!   where the launch lands: the last workspace and tab, or Home.
@@ -38,6 +40,7 @@ pub mod browser;
 pub mod chat;
 pub mod close;
 pub mod closed;
+pub mod editors;
 pub mod files;
 pub mod history;
 pub mod launch;

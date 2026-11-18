@@ -484,11 +484,19 @@ fn action_list_export_matches() {
             assert_eq!(row["palette"], action.surface_plan.palette.wire(), "{id}");
         }
         assert_eq!(row["cli"], action.surface_plan.cli.map_or("undeclared", |d| d.wire()), "{id}");
-        assert_eq!(
-            row["context_menu"],
-            action.surface_plan.context_menu().map_or("undeclared", |d| d.wire()),
-            "{id}"
-        );
+        let context_menu = action.surface_plan.context_menu().map_or("undeclared", |d| d.wire());
+        // A row that leaves its right-click exemption for placements (or the reverse) keeps the
+        // pinned decision in the export until the re-pin.
+        if field_awaits_repin(id, "/surfacePlan/contextMenuExemption") {
+            assert_ne!(
+                row["context_menu"],
+                context_menu,
+                "action-surfaces.json has {id}'s right-click decision: the re-pin landed, so take /surfacePlan/contextMenuExemption out of {} (delete the file when it is the last)",
+                marker("fields", id)
+            );
+        } else {
+            assert_eq!(row["context_menu"], context_menu, "{id}");
+        }
         assert_eq!(
             row["mcp"],
             action.surface_plan.mcp().map_or("undeclared", |d| d.wire()),
@@ -542,9 +550,21 @@ fn action_list_export_matches() {
             );
         } else {
             assert_eq!(args.len(), action.arguments.len(), "{id}");
-            for (wire, argument) in args.iter().zip(action.arguments) {
+            for (index, (wire, argument)) in args.iter().zip(action.arguments).enumerate() {
                 assert_eq!(wire["name"], argument.name, "{id}");
-                assert_eq!(wire["required"], argument.required, "{id}.{}", argument.name);
+                // An argument made optional (or required) keeps the pinned flag until the re-pin.
+                let pointer = format!("/arguments/{index}/isRequired");
+                if field_awaits_repin(id, &pointer) {
+                    assert_ne!(
+                        wire["required"],
+                        argument.required,
+                        "action-surfaces.json has {id}.{}'s required flag: the re-pin landed, so take {pointer} out of {} (delete the file when it is the last)",
+                        argument.name,
+                        marker("fields", id)
+                    );
+                } else {
+                    assert_eq!(wire["required"], argument.required, "{id}.{}", argument.name);
+                }
             }
         }
         let section = &row["palette_section"];

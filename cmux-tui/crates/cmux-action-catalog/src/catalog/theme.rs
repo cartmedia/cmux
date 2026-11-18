@@ -44,7 +44,7 @@ pub static ACTIONS: &[Action] = &[
         category: "workspace",
         symbol: "paintbrush",
         surfaces: PALETTE | KEYBOARD | CONTEXT_MENU,
-        surface_plan: SurfacePlan { cli: Some(Decision::Offered), context_menus: &[Placement::at("agentChat", "identity", 1).style("choices").label(t("AgentChatMenu", "menu.agentChat.theme", "Theme"))], ..SurfacePlan::DEFAULT },
+        surface_plan: SurfacePlan { cli: Some(Decision::Offered), context_menus: &[Placement::at("agentChat", "identity", 1).style("choices").folder("appearance").label(t("AgentChatMenu", "menu.agentChat.theme", "Theme"))], ..SurfacePlan::DEFAULT },
         arguments: &[args::THEME],
         targets: &["workspace"],
         cli_name: "workspace set-theme",

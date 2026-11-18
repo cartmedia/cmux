@@ -16,7 +16,7 @@ pub static ACTIONS: &[Action] = &[
         category: "settings",
         symbol: "photo",
         surfaces: PALETTE | CONTEXT_MENU,
-        surface_plan: SurfacePlan { cli: Some(Decision::Offered), context_menus: &[Placement::at("agentChat", "identity", 0), Placement::at("windowBackground", "identity", 0)], ..SurfacePlan::DEFAULT },
+        surface_plan: SurfacePlan { cli: Some(Decision::Offered), context_menus: &[Placement::at("agentChat", "identity", 0).folder("appearance"), Placement::at("windowBackground", "identity", 0)], ..SurfacePlan::DEFAULT },
         cli_name: "settings change-background",
         ..Action::DEFAULT
     },

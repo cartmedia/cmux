@@ -1,6 +1,7 @@
 // cmux NEXT action catalog data. Edit by hand: this is the source of truth.
 //! The `WorkspaceVerbActionCatalog` actions.
 
+use super::agent_chat_menu::{COPY_PATH, OPEN_IN, OPEN_IN_EDITOR, OPEN_TERMINAL_HERE, REVEAL_IN_FINDER};
 use super::args;
 use crate::model::*;
 use crate::text::t;
@@ -361,9 +362,54 @@ pub static ACTIONS: &[Action] = &[
         category: "workspace",
         symbol: "doc.on.clipboard",
         surfaces: PALETTE | KEYBOARD | CONTEXT_MENU,
-        surface_plan: SurfacePlan { cli: Some(Decision::Exempt("clipboard")), context_menu_exemption: Some("pointerMenuTrim"), ..SurfacePlan::DEFAULT },
+        surface_plan: SurfacePlan { cli: Some(Decision::Exempt("clipboard")), context_menus: &[Placement::at("workspaceRow", "inspect", 407).folder("copy").label(COPY_PATH)], ..SurfacePlan::DEFAULT },
         targets: &["workspace"],
         cli_name: "workspace copy-path",
+        ..Action::DEFAULT
+    },
+    // The workspace's folder, one click away (Open in Editor, Open In ▸, Reveal in Finder, Open
+    // Terminal Here, Copy Path) on the workspace row's menu. A remote or Cloud workspace refuses the
+    // editor and terminal rows with the registry's remote refusal.
+    Action {
+        id: "workspace.openInEditor",
+        group: GROUP,
+        title: t("WorkspaceActions", "action.workspace.openInEditor", "Open Workspace in Editor"),
+        keywords: &["cwd", "directory", "folder", "editor", "ide", "code", "vscode", "cursor", "zed", "xcode", "open"],
+        category: "workspace",
+        symbol: "chevron.left.forwardslash.chevron.right",
+        surfaces: PALETTE | KEYBOARD | CONTEXT_MENU,
+        surface_plan: SurfacePlan { cli: Some(Decision::Offered), context_menus: &[Placement::at("workspaceRow", "reopen", 0).label(OPEN_IN_EDITOR)], ..SurfacePlan::DEFAULT },
+        arguments: &[args::EDITOR.optional()],
+        targets: &["workspace"],
+        cli_name: "workspace open-in-editor",
+        ..Action::DEFAULT
+    },
+    Action {
+        id: "workspace.openInApp",
+        group: GROUP,
+        title: t("WorkspaceActions", "action.workspace.openInApp", "Open Workspace In…"),
+        keywords: &["cwd", "directory", "folder", "editor", "ide", "open in", "open with", "app"],
+        category: "workspace",
+        symbol: "arrow.up.forward.app",
+        surfaces: PALETTE | KEYBOARD | CONTEXT_MENU,
+        surface_plan: SurfacePlan { cli: Some(Decision::Offered), context_menus: &[Placement::at("workspaceRow", "reopen", 1).style("choices").label(OPEN_IN)], ..SurfacePlan::DEFAULT },
+        arguments: &[args::EDITOR],
+        targets: &["workspace"],
+        cli_name: "workspace open-in",
+        ..Action::DEFAULT
+    },
+    Action {
+        id: "workspace.openTerminalHere",
+        group: GROUP,
+        title: t("WorkspaceActions", "action.workspace.openTerminalHere", "Open Terminal in Workspace Folder"),
+        keywords: &["cwd", "directory", "folder", "terminal", "shell", "here", "new tab"],
+        category: "workspace",
+        symbol: "terminal",
+        surfaces: PALETTE | KEYBOARD | CONTEXT_MENU,
+        surface_plan: SurfacePlan { cli: Some(Decision::Offered), context_menus: &[Placement::at("workspaceRow", "reopen", 3).label(OPEN_TERMINAL_HERE)], ..SurfacePlan::DEFAULT },
+        targets: &["workspace"],
+        cli_name: "workspace open-terminal-here",
+        starts_terminal: true,
         ..Action::DEFAULT
     },
     Action {
