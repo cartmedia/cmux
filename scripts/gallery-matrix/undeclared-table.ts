@@ -39,4 +39,10 @@ if (import.meta.main) {
   if (!values.results) throw new Error("--results <dir with results.json> is required");
   const results = JSON.parse(readFileSync(join(values.results, "results.json"), "utf8")) as Result[];
   console.log(table(results));
+  // With DETAIL=1 (undeclared-run.sh), every undeclared move of every case, as the judge reported it.
+  if (process.env.DETAIL === "1")
+    for (const result of results)
+      for (const phase of [result.load, ...(result.play?.steps ?? [])])
+        for (const move of phase?.undeclaredMoves ?? [])
+          console.log(`undeclared ${String(result.params?.variant ?? "")} w${String(result.params?.width ?? "")} ${phase?.step ?? "load"}: ${JSON.stringify(move)}`);
 }

@@ -205,30 +205,51 @@ export function startBoxTracker(
   const judged: JudgeFrame[] = [];
   const view = doc.defaultView!;
   let handle = 0;
-  const read = () => {
-    const media = [...doc.querySelectorAll(MEDIA_SELECTOR)];
-    const open = openDeclarations();
+  let stopped = false;
+  const targetsNow = () => [
+    ...targetList(options.target ?? null),
     // A move the page declares on targets (an expand it runs itself) relates boxes to those targets too.
-    const targets = [...targetList(options.target ?? null), ...open.flatMap((declaration) => declaration.targets ?? [])];
-    const samples = sampleBoxes(doc, targets, [...(options.extra?.() ?? []), ...media]);
-    const scored: BoxFrame = new Map();
-    for (const [id, sample] of samples) if (sample.surface !== "chat-media") scored.set(id, sample);
-    frames.push(scored);
+    ...openDeclarations().flatMap((declaration) => declaration.targets ?? []),
+  ];
+  const score = () => {
+    frames.push(sampleBoxes(doc, targetsNow(), options.extra?.() ?? []));
+  };
+  // The judge reads each frame as it drew: after the frame's own layout and ResizeObserver passes (a
+  // resize's rows are placed there, before paint). A read in requestAnimationFrame comes before those
+  // passes, so it saw a resized page's rows rewrapped but not yet placed, a state no frame paints, and
+  // the placement after it as a second move. A message posted from the frame's callback runs once the
+  // frame is done.
+  const judge = () => {
+    const open = openDeclarations();
+    const media = [...doc.querySelectorAll(MEDIA_SELECTOR)];
+    const samples = sampleBoxes(doc, targetsNow(), [...(options.extra?.() ?? []), ...media]);
     const declared = [
       ...(options.declared?.() ?? []),
       ...open.map(({ key, event, scope, once, by }) => ({ key: -key, event, scope, once, by })),
     ];
     judged.push({ samples, declared });
   };
+  const drawn = new MessageChannel();
+  drawn.port1.onmessage = () => {
+    if (!stopped && judged.length < MAX_FRAMES) judge();
+  };
   const sample = () => {
-    if (frames.length < MAX_FRAMES) read();
+    if (frames.length < MAX_FRAMES) score();
+    drawn.port2.postMessage(0);
     handle = view.requestAnimationFrame(sample);
   };
-  sample();
+  // The page as it is when the step starts, at rest; after that only frames that drew are read (a read
+  // between the act and the next frame sees the act's layout before the page placed it).
+  score();
+  judge();
+  handle = view.requestAnimationFrame(sample);
   return {
     stop() {
+      stopped = true;
       view.cancelAnimationFrame(handle);
-      read();
+      drawn.port1.close();
+      score();
+      judge();
       const shift = scoreBoxFrames(frames, { width: view.innerWidth, height: view.innerHeight }, options);
       // A step starts on a page that has been still: its first frame's boxes have rested already.
       if (options.restedAtStart && judged.length) judged.unshift(...Array.from({ length: 2 }, () => judged[0]!));

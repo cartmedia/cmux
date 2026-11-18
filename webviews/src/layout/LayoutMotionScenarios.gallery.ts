@@ -81,7 +81,7 @@ const trace = (ctx: PlayContext, label: string, frames = 24) => {
   const view = doc.defaultView!;
   const started = view.performance.now();
   let frame = 0;
-  const tick = () => {
+  const log = (when: string) => {
     const scroller = doc.querySelector<HTMLElement>(".acpmux-scroll");
     const rows = [...doc.querySelectorAll<HTMLElement>("[data-row-id]")]
       .filter((row) => /motion-(7|8)-/.test(row.dataset.rowId ?? ""))
@@ -90,10 +90,20 @@ const trace = (ctx: PlayContext, label: string, frames = 24) => {
         return `${row.dataset.rowId}:${box.top.toFixed(1)}/${box.height.toFixed(1)}`;
       });
     console.log(
-      `motion-trace ${label} f${frame} t${(view.performance.now() - started).toFixed(0)} w${scroller?.clientWidth} st${scroller?.scrollTop.toFixed(1)} sh${scroller?.scrollHeight} ${rows.join(" ")}`,
+      `motion-trace ${label} f${frame}${when} t${(view.performance.now() - started).toFixed(0)} w${scroller?.clientWidth} st${scroller?.scrollTop.toFixed(1)} sh${scroller?.scrollHeight} ${rows.join(" ")}`,
     );
+  };
+  // Each frame twice: in its callback (before its layout and ResizeObserver passes) and once it has drawn.
+  const drawn = new MessageChannel();
+  drawn.port1.onmessage = () => {
+    log("d");
     frame += 1;
     if (frame < frames) view.requestAnimationFrame(tick);
+    else drawn.port1.close();
+  };
+  const tick = () => {
+    log("r");
+    drawn.port2.postMessage(0);
   };
   tick();
 };
