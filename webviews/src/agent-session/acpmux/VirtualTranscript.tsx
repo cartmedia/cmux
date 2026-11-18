@@ -4019,9 +4019,7 @@ function TranscriptView({
       (row, measureWidth) => registry[rowKind(row)]?.measure?.(row, measureWidth),
       // A chat shown again takes its rows' heights from the layout it left, by id, version and text: its
       // estimate measures only the rows that changed since (conversation/keptLayouts.ts).
-      measurementSession.current === sessionId
-        ? keptLayouts.seed(sessionId, rows, rowHeights.current.heights, gridScale())
-        : undefined,
+      measurementSession.current === sessionId ? keptLayouts.seed(sessionId, rows, rowHeights.current.heights, gridScale()) : undefined,
       kept,
       sessionId,
       resizing,
