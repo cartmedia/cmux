@@ -27,14 +27,17 @@ on:
 permissions: {}
 
 concurrency:
-  group: language-boundaries-${{ github.event.pull_request.number }}
+  group: language-boundaries-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && !github.event.changes.base && format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   language-boundaries:
-    name: language-boundaries
+    # A title or description edit changes nothing this job reads: it starts no runner, and its skipped job takes a name
+    # and a concurrency group of its own, so it never reads as a pass over a red nor cancels a real run
+    # (tests/test_ci_edit_events_start_no_runner.py).
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'language-boundaries (edit, not re-run)' || 'language-boundaries' }}
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) && (!(github.event.pull_request.state == 'closed' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && startsWith(github.event.label.name, 'fix-cause:'))) }}
     # A fix-cause:* label on a closed pull request starts no job (tests/test_ci_fix_cause_labels_start_no_jobs.py).
-    if: ${{ !(github.event.pull_request.state == 'closed' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && startsWith(github.event.label.name, 'fix-cause:')) }}
     # Every label change on an open pull request re-runs it (a skipped run would read as a pass and replace a failing one).
     # A base-revision control-plane job (cla-policy-guard.yml's runner rule): a VM destroyed after one job,
     # never a persistent or contributor-controlled machine.

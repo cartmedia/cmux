@@ -26,13 +26,17 @@ on:
 permissions: {}
 
 concurrency:
-  group: classic-api-guard-${{ github.event.pull_request.number }}
+  group: classic-api-guard-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && !github.event.changes.base && !(github.event.changes.body && (contains(github.event.pull_request.body, 'Classic API change:') || contains(github.event.changes.body.from, 'Classic API change:'))) && format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   classic-api:
-    name: classic-api-guard
-    # Every edit re-runs it (a skipped run would read as a pass and replace a failing one).
+    # An edit that leaves the `Classic API change:` line as it was (a title, the rest of the description)
+    # changes nothing this job reads: it starts no runner, and its skipped job takes a name and a concurrency
+    # group of its own, so it never reads as a pass over a red nor cancels a real run. A retarget re-runs it
+    # (tests/test_ci_edit_events_start_no_runner.py).
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && !(github.event.changes.body && (contains(github.event.pull_request.body, 'Classic API change:') || contains(github.event.changes.body.from, 'Classic API change:'))) && 'classic-api-guard (edit, not re-run)' || 'classic-api-guard' }}
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base && !(github.event.changes.body && (contains(github.event.pull_request.body, 'Classic API change:') || contains(github.event.changes.body.from, 'Classic API change:')))) }}
     runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('["ubuntu-24.04","blacksmith-2vcpu-ubuntu-2404","blacksmith-4vcpu-ubuntu-2404","blacksmith-8vcpu-ubuntu-2404"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }} # ephemeral-required: pull_request_target runs for forks too; CI_TRUSTED_RUNNER picks Blacksmith (default) or GitHub-hosted
     timeout-minutes: 5
     permissions:

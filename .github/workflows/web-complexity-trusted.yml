@@ -41,9 +41,13 @@ concurrency:
 
 jobs:
   complexity:
-    # Keep the required context literal and evaluate the real verdict on edits.
-    # GitHub can publish an unevaluated name expression when a job is skipped.
-    name: Web complexity
+    # A title or description edit changes nothing this job reads: it starts no runner, and its skipped job takes a name
+    # and a concurrency group of its own, so it never reads as a pass over a red nor cancels a real run
+    # (tests/test_ci_edit_events_start_no_runner.py).
+    # GitHub may publish the name expression unevaluated when a job is skipped; either way it is not the
+    # `Web complexity` context, which a push, a retarget and the merge queue publish literally.
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'Web complexity (edit, not re-run)' || 'Web complexity' }}
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) }}
     # The job reads untrusted source bytes, so it needs an ephemeral runner;
     # no repository variable may select a persistent host. CI_TRUSTED_RUNNER
     # only chooses GitHub-hosted or a one-job Blacksmith VM from the list

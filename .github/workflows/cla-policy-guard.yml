@@ -11,8 +11,11 @@ permissions: {}
 
 jobs:
   validate:
-    # Every suite must publish the stable required context, including metadata edits.
-    name: CLA policy guard
+    # A title or description edit changes nothing this job reads: it starts no runner, and its skipped job takes a name
+    # and a concurrency group of its own, so it never reads as a pass over a red nor cancels a real run
+    # (tests/test_ci_edit_events_start_no_runner.py).
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'CLA policy guard (edit, not re-run)' || 'CLA policy guard' }}
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) }}
     # This control-plane workflow parses attacker-controlled YAML and shell
     # bytes, so it runs only on a VM destroyed after one job. CI_TRUSTED_RUNNER
     # can pick only GitHub-hosted ubuntu-24.04 or a Blacksmith Ubuntu VM (any
