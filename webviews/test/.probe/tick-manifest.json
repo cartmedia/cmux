@@ -1,0 +1,6 @@
+[
+  {"id": "agent-pane.ticking-bottom-still--ticking--w760", "path_or_url": "frame.html",
+   "params": {"entry": "agent-pane.ticking-bottom-still", "variant": "ticking", "locale": "en", "theme": "Apple System Colors", "colorScheme": "dark", "width": 760, "height": 640}},
+  {"id": "agent-pane.ticking-bottom-still--ticking-resent--w760", "path_or_url": "frame.html",
+   "params": {"entry": "agent-pane.ticking-bottom-still", "variant": "ticking-resent", "locale": "en", "theme": "Apple System Colors", "colorScheme": "dark", "width": 760, "height": 640}}
+]
