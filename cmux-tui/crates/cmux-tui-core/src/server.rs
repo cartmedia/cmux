@@ -137,6 +137,10 @@ mod agent_session_attach;
 #[cfg(unix)]
 mod mobile_chat;
 #[cfg(unix)]
+mod machine_chats;
+#[cfg(unix)]
+pub use machine_chats::machine_chats;
+#[cfg(unix)]
 pub(crate) use agent_session_attach::agent_session_link::chat_marks::ChatMarkError;
 #[cfg(unix)]
 pub use agent_session_attach::{
