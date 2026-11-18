@@ -1,0 +1,80 @@
+{
+ "envs": [
+  [
+   "light",
+   "none"
+  ],
+  [
+   "dark",
+   "none"
+  ]
+ ],
+ "shots": [
+  {
+   "name": "before-cards-empty",
+   "entry": "agent-pane.new-tab-looks-before",
+   "variant": "cards-empty",
+   "width": 1100,
+   "height": 720,
+   "deviceScaleFactor": 2,
+   "arms": {
+    "now": ""
+   }
+  },
+  {
+   "name": "before-cards-few",
+   "entry": "agent-pane.new-tab-looks-before",
+   "variant": "cards-few",
+   "width": 1100,
+   "height": 720,
+   "deviceScaleFactor": 2,
+   "arms": {
+    "now": ""
+   }
+  },
+  {
+   "name": "before-cards-10k",
+   "entry": "agent-pane.new-tab-looks-before",
+   "variant": "cards-10k",
+   "width": 1100,
+   "height": 720,
+   "deviceScaleFactor": 2,
+   "arms": {
+    "now": ""
+   }
+  },
+  {
+   "name": "before-default-empty",
+   "entry": "agent-pane.new-tab-looks-before",
+   "variant": "default-empty",
+   "width": 1100,
+   "height": 720,
+   "deviceScaleFactor": 2,
+   "arms": {
+    "now": ""
+   }
+  },
+  {
+   "name": "before-default-few",
+   "entry": "agent-pane.new-tab-looks-before",
+   "variant": "default-few",
+   "width": 1100,
+   "height": 720,
+   "deviceScaleFactor": 2,
+   "arms": {
+    "now": ""
+   }
+  },
+  {
+   "name": "before-default-10k",
+   "entry": "agent-pane.new-tab-looks-before",
+   "variant": "default-10k",
+   "width": 1100,
+   "height": 720,
+   "deviceScaleFactor": 2,
+   "arms": {
+    "now": ""
+   }
+  }
+ ]
+}
