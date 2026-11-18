@@ -42,7 +42,7 @@ import {
   NEW_TAB_LABELS,
   prefixedEdit,
   cycleKind,
-  recentSessions,
+  RecentSessions,
 } from "./newTabModel";
 
 function escapedLiteral(value: string): string {
@@ -353,7 +353,10 @@ export function NewTabPage({
     return true;
   });
   const composing = useRef(false);
-  const recent = useMemo(() => recentSessions(snapshot.sessions), [snapshot.sessions]);
+  // Kept as the chats change (newTabModel.ts `RecentSessions`): another chat's event reads that chat only.
+  const keptRecent = useRef<RecentSessions>(null);
+  keptRecent.current ??= new RecentSessions();
+  const recent = useMemo(() => keptRecent.current!.of(snapshot.sessions), [snapshot.sessions]);
   // The suggestions float over the page under the field (cx-6k6cg), so they show only while the
   // field has the keyboard and something is typed: at rest nothing covers the page below.
   const [focused, setFocused] = useState(false);

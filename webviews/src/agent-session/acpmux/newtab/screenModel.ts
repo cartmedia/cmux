@@ -3,7 +3,7 @@
 // host: NewTabScreen renders what these return.
 import { withoutInlineTokens } from "../attachments";
 import type { AcpmuxSnapshot } from "../model";
-import { ageLabel, recentSessions } from "../newTabModel";
+import { ageLabel, RecentSessions, recentSessions } from "../newTabModel";
 import {
   EMPTY_OMNIBAR,
   foldedScore,
@@ -14,7 +14,14 @@ import {
   type OmnibarProfile,
   type OmnibarRow,
 } from "../omnibar";
-import { activityTime, listed, normalizedSessionEntry, sessionMark, type AcpmuxSessionEntry } from "../sessionList";
+import {
+  activityTime,
+  listed,
+  normalizedSessionEntry,
+  sessionMark,
+  SessionsBy,
+  type AcpmuxSessionEntry,
+} from "../sessionList";
 import { classifyNewTabInput, TERMINAL_PREFIX } from "../newTabIntent";
 import { commandLikeness, isMultiline } from "./commandIntent";
 import { type Translate, translate } from "../i18n";
@@ -698,8 +705,9 @@ export function recentChatCards(
   device: DeviceChat[] = [],
   count = CHAT_CARD_COUNT,
   fold = true,
+  kept?: KeptChatCards,
 ): ChatCard[] {
-  const live = liveChatCards(sessions, now, t, count, fold);
+  const live = liveChatCards(sessions, now, t, count, fold, kept?.recent);
   const shown = new Set(live.map((card) => card.title.trim().toLowerCase()));
   // Every session's, an archived one's too: its transcript must not come back as a device chat.
   // Read only when there are device chats to fill with: a pass over every chat otherwise.
@@ -725,7 +733,7 @@ export function recentChatCards(
     }));
   const cards = [...live, ...fill];
   if (!fold) return cards;
-  const children = indexChildren(sessions, device, now, t, cardParents(cards));
+  const children = indexChildren(sessions, device, now, t, cardParents(cards), kept?.children);
   return cards.map((card) => withChildren(card, children));
 }
 
@@ -758,8 +766,43 @@ function liveChatCards(
   t: Translate,
   count: number,
   fold: boolean,
+  recent?: RecentSessions,
 ): ChatCard[] {
-  return recentSessions(sessions, count, fold).map((session) => sessionCard(session, now, t));
+  return (recent ? recent.of(sessions, count, fold) : recentSessions(sessions, count, fold)).map((session) =>
+    sessionCard(session, now, t),
+  );
+}
+
+/// What a page keeps of its chat list between changes, so `recentChatCards` reads the chats that
+/// changed, not all of them (Leo, 2026-11-18, "typing in the composer still slow 😞 there must be a
+/// lot of open stuff?"; bench/session-scale-typing.bench.ts).
+export class KeptChatCards {
+  readonly recent = new RecentSessions();
+  readonly children = new ChildIndex();
+}
+
+/// Where each chat another started sits in the list, by the chat that started it: the same while
+/// no chat changes who started it, so a page finds a shown card's children without a pass over
+/// every chat.
+export class ChildIndex {
+  private readonly starters = new SessionsBy((session) => [session.spawnedBy]);
+  private read: readonly AcpmuxSessionEntry[] | undefined;
+  private positions = new Map<string, number[]>();
+
+  of(sessions: AcpmuxSnapshot["sessions"]): ReadonlyMap<string, readonly number[]> {
+    const list = this.starters.of(sessions as readonly AcpmuxSessionEntry[]);
+    if (list === this.read) return this.positions;
+    this.read = list;
+    this.positions = new Map();
+    list.forEach((raw, at) => {
+      const parent = normalizedSessionEntry(raw as Parameters<typeof normalizedSessionEntry>[0]).spawnedBy;
+      if (!parent) return;
+      const known = this.positions.get(parent);
+      if (known) known.push(at);
+      else this.positions.set(parent, [at]);
+    });
+    return this.positions;
+  }
 }
 
 function sessionCard(session: AcpmuxSessionEntry, now: number, t: Translate): ChatCard {
@@ -800,6 +843,7 @@ function indexChildren(
   now: number,
   t: Translate,
   parents: ReadonlySet<string>,
+  index?: ChildIndex,
 ): Map<string, ChildCard[]> {
   const indexed = new Map<string, ChildCard[]>();
   const add = (child: ChildCard) => {
@@ -807,12 +851,16 @@ function indexChildren(
     if (list) list.push(child);
     else indexed.set(child.parent, [child]);
   };
-  for (const raw of sessions) {
+  const consider = (raw: AcpmuxSnapshot["sessions"][number]) => {
     const session = normalizedSessionEntry(raw as Parameters<typeof normalizedSessionEntry>[0]);
-    if (!session.spawnedBy || !parents.has(session.spawnedBy) || !listed(session)) continue;
-    if (sessionMark(session, false) === "input") continue;
+    if (!session.spawnedBy || !parents.has(session.spawnedBy) || !listed(session)) return;
+    if (sessionMark(session, false) === "input") return;
     add({ parent: session.spawnedBy, at: activityTime(session) ?? 0, card: sessionCard(session, now, t) });
-  }
+  };
+  if (index) {
+    const positions = index.of(sessions);
+    for (const parent of parents) for (const at of positions.get(parent) ?? []) consider(sessions[at]!);
+  } else for (const raw of sessions) consider(raw);
   for (const chat of device) {
     if (!chat.parent || !parents.has(chat.parent)) continue;
     const child = {

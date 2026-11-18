@@ -29,11 +29,9 @@ import {
   firstProject,
   homePath,
   isAgentHome,
-  mostRecentProject,
   projectLabel,
   sessionMark,
-  folderFields,
-  SessionsBy,
+  FolderRecency,
 } from "../sessionList";
 import { leaders } from "../leads";
 import { WorktreeFailure } from "../startFolder";
@@ -82,7 +80,7 @@ import { Spinner } from "../conversation/icons";
 import { newTabStart, useNewTabChipModel } from "./chipDefaults";
 import { useLastPick } from "../lastPick";
 import { useDeviceChats } from "./deviceChats";
-import { listingWanted, omnibarFolders } from "./launchRows";
+import { listingWanted, omnibarFolder, omnibarFolders } from "./launchRows";
 import { type CompleteFolder, useFolderListing } from "./omnibarReads";
 import { useRecentlyClosed } from "./recentlyClosed";
 import { initialRecentProject } from "./recentProject";
@@ -95,6 +93,7 @@ import {
   inlineCompletion,
   needsYouCards,
   profileRows,
+  KeptChatCards,
   recentChatCards,
   screenRows,
   searchWords,
@@ -453,14 +452,14 @@ export function NewTabScreen(props: Props) {
   }, [props.startMachine]);
   const folderless = !props.cwd || props.cwd === home || isAgentHome(props.cwd);
   const startsRecent = !picked && folderless && !props.startCwd;
-  // The chats as their folders read them (sessionList.ts `folderFields`): another chat working changes
-  // none of them, so the newest project is not looked for again in every chat on each of its events.
-  const folderSessions = useRef<SessionsBy>(null);
-  folderSessions.current ??= new SessionsBy(folderFields);
-  const foldersOf = folderSessions.current.of(snapshot.sessions);
+  // This Mac's chat folders, newest first, kept as the chats change (sessionList.ts
+  // `FolderRecency`): a chat working moves its folder up without every chat being sorted again.
+  const recency = useRef<FolderRecency>(null);
+  recency.current ??= new FolderRecency();
+  const recentFolders = recency.current.of(snapshot.sessions);
   const candidate = useMemo(
-    () => (startsRecent ? mostRecentProject(foldersOf, home, props.knownProjects) : undefined),
-    [startsRecent, foldersOf, home, props.knownProjects],
+    () => (startsRecent ? firstProject(recentFolders, home, props.knownProjects) : undefined),
+    [startsRecent, recentFolders, home, props.knownProjects],
   );
   // Decided once, as the page mounts (Leo 2026-10-19: the first frame showed "Choose folder", then
   // flipped to the recent project): the newest in the chats the page already has, else the newest a
@@ -1033,10 +1032,12 @@ export function NewTabScreen(props: Props) {
   // The omnibar's agent sources (launchRows.ts): the folders and agents it starts. A typed path's
   // folder listing answers later (omnibarReads.ts), never in the keystroke's turn.
   const barText = touched && !shell && !commandTyping && !profilePick ? typed : "";
-  const barFolders = useMemo(
-    () => omnibarFolders(props.projects, snapshot.sessions),
-    [props.projects, snapshot.sessions],
-  );
+  // The chats' folders newest first, kept as the chats change (sessionList.ts `FolderRecency`):
+  // another chat working sorts no chat again.
+  const barRecency = useRef<FolderRecency>(null);
+  barRecency.current ??= new FolderRecency(omnibarFolder);
+  const barRecent = barRecency.current.of(snapshot.sessions);
+  const barFolders = useMemo(() => omnibarFolders(props.projects, barRecent), [props.projects, barRecent]);
   const barAgents = useMemo(
     () =>
       // A saved environment or New project picks where the chat starts (askChat), so a start in
@@ -1134,8 +1135,20 @@ export function NewTabScreen(props: Props) {
   // Ages read the shared clock (clock.ts): every page shows the same age and changes it together.
   const clock = useMinuteClock();
   const at = now ?? clock;
+  // The recent chats and their children kept as the chats change (screenModel.ts `KeptChatCards`).
+  const keptCards = useRef<KeptChatCards>(null);
+  keptCards.current ??= new KeptChatCards();
   const cards = useMemo(
-    () => recentChatCards(snapshot.sessions, at, t, device, sections.recent, sections.chats === "list"),
+    () =>
+      recentChatCards(
+        snapshot.sessions,
+        at,
+        t,
+        device,
+        sections.recent,
+        sections.chats === "list",
+        keptCards.current!,
+      ),
     [snapshot.sessions, at, t, device, sections.recent, sections.chats],
   );
   // With All chats on the page (the host answers `chats.page`) every chat is in that list, so
