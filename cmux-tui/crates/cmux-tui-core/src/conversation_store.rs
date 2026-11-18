@@ -900,6 +900,22 @@ impl ConversationEvent {
         }
     }
 
+    /// The `event` name of [`Self::wire_json`], read without building it: a
+    /// page relay's mailbox takes only the events its page hears
+    /// (server/cmd_subscribe.rs `subscribed_event_name`).
+    pub(crate) fn wire_name(&self) -> Option<&str> {
+        Some(match self {
+            Self::Changed { .. } => "conversation-changed",
+            Self::Typing { .. } => "conversation-typing",
+            Self::Draft { item, .. } => return item.get("event").and_then(Value::as_str),
+            Self::Inbox { .. } => "conversation-inbox-changed",
+            Self::Run { .. } => "conversation-run-changed",
+            Self::Live { .. } => "conversation-live",
+            Self::Avatar { .. } => "participant-avatar-changed",
+            Self::Chief { .. } => "chief-changed",
+        })
+    }
+
     /// Run events go on `subscribe` only to a connection that asked for them.
     pub(crate) const fn is_run(&self) -> bool {
         matches!(self, Self::Run { .. })
