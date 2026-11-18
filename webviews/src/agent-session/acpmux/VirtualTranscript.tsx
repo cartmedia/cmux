@@ -159,10 +159,13 @@ import {
   clearFindHighlights,
   FIND_ACTIVE_HIGHLIGHT,
   FindReveal,
+  asPattern,
   foldFind,
   findRowIndex,
   findMemberRowId,
   paintFindHighlights,
+  findPaintRows,
+  patternFilters,
   type ChatFind,
   rowHolds,
 } from "./conversation/chatFind";
@@ -5562,14 +5565,32 @@ function TranscriptView({
   useEffect(() => () => pacing.stop(), [pacing]);
   // Find in Chat: a new current match scrolls its row in (it may not be mounted), then, once its
   // text is drawn, the match itself; every commit repaints the highlights over the mounted rows.
-  const findQuery = find?.open ? find.query : "";
+  // What Find matches (chatFind.ts `pattern`: the daemon's reading of the bar's text, or the text as
+  // one needle), named by its key; the current match's term opens what hides it.
+  const findOpen = find?.open === true;
+  const findGiven = find?.pattern;
+  const findText = find?.query ?? "";
+  const findPattern = useMemo(() => {
+    if (!findOpen) return undefined;
+    const pattern = findGiven ?? asPattern(findText);
+    return pattern.terms.length ? pattern : undefined;
+  }, [findOpen, findGiven, findText]);
+  const findQuery = findPattern?.key ?? "";
   const findTarget = find?.matches[find.active];
   const findTargetRowId = findTarget?.rowId;
   const findTargetOccurrence = findTarget?.occurrence;
+  const findNeedle = findTarget?.term ?? findPattern?.terms[0] ?? "";
+  // A pattern that filters rows (a role, a time, an excluded word, several terms) paints only the
+  // rows its matches are in.
+  const findMatchList = find?.matches;
+  const findPaintOnly = useMemo(
+    () => (findPattern && findMatchList && patternFilters(findPattern) ? findPaintRows(rows, findMatchList) : undefined),
+    [findPattern, findMatchList, rows],
+  );
   // Find matches the chat's rows; the transcript draws a match's row (or its copy in an open fold)
   // once its fold is open.
   const findIndex =
-    findTargetRowId !== undefined ? findRowIndex(rows, findTargetRowId, rowHolds({ needle: findQuery })) : -1;
+    findTargetRowId !== undefined ? findRowIndex(rows, findTargetRowId, rowHolds({ needle: findNeedle })) : -1;
   const drawnId = rows[findIndex]?.id;
   const drawnCard = Boolean(rows[findIndex]?.ended);
   // Pending and delivered notice batches retain the matched member for disclosure and highlighting.
@@ -5592,12 +5613,12 @@ function TranscriptView({
         ? {
             rowId: drawnId,
             card: drawnCard,
-            needle: foldFind(findQuery),
+            needle: foldFind(findNeedle),
             repaint: () => setRevealed((count) => count + 1),
             ...(matchRowId !== undefined ? { matchRowId } : {}),
           }
         : undefined,
-    [drawnId, drawnCard, findQuery, matchRowId],
+    [drawnId, drawnCard, findQuery, findNeedle, matchRowId],
   );
   // Find chooses the reader's new place. Discard the previous scroll owners synchronously;
   // closing Find, a query edit or a measurement must never put that old place back.
@@ -5713,7 +5734,7 @@ function TranscriptView({
     if (!findQuery) return clearFindHighlights();
     const current = paintFindHighlights(
       node,
-      findQuery,
+      findPattern ?? findQuery,
       findTargetRowId !== undefined && findTargetOccurrence !== undefined && drawnId !== undefined
         ? {
             rowId: paintedId!,
@@ -5721,6 +5742,7 @@ function TranscriptView({
             occurrence: findTargetOccurrence,
           }
         : undefined,
+      findPaintOnly,
     );
     if (!current || revealing.current !== targetKey || !findRequest.current?.()) return;
     // A match in a closed group is drawn before the group opens (with no size), and it moves as the
@@ -5769,6 +5791,8 @@ function TranscriptView({
     drawnCard,
     drawnId,
     findQuery,
+    findPattern,
+    findPaintOnly,
     findTargetOccurrence,
     findMoved,
     findTargetRowId,
