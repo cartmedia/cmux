@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use acpmux_transcript_search as ts;
 use cmux_chat_index::{ChatIndex, IndexedChat};
 use serde_json::{Value, json};
 
@@ -58,6 +59,24 @@ fn row_value(chat: &IndexedChat, activity: &ChatActivity) -> Value {
 /// counted in `total`. A chat whose held text (its newest `text::CHAT_BYTES`) lacks them is found
 /// by the transcript index (`deep.rs`): its `match` carries `at`, the message's time (ms since the
 /// epoch), and the window stays `filling` until the index answered.
+///
+/// The search syntax (Leo, 2026-11-18: "I know that VS Code has like a decent kind of searching
+/// thing with arguments and whatnot, likewise with Obsidian"; `acpmux_transcript_search::syntax`,
+/// the parser Find in Chat and `_acpmux/transcript_search` read): `query` may hold operators.
+/// `agent:claude|codex` keeps that harness's chats; `folder:NAME` / `repo:NAME` the chats whose
+/// folder holds NAME (any case); `since:` / `before:` (`7d`, `24h`, `today`, `2026-11-01`; local
+/// days by `tzOffsetMinutes`, minutes ahead of UTC) a title match by the chat's `updatedAt` and a
+/// content match by its message's time (a held message has none: its chat's `updatedAt` stands
+/// in); `from:me|agent|tool` the content match's role (the held text has no tool calls: `from:tool`
+/// asks the transcript index alone); `-word` / `-"a phrase"` drops a chat whose title or folder
+/// holds it and a content match whose message holds it; `"a phrase"` matches as a phrase (in the
+/// title or folder, after the ranker found the chat by its words, and in a message); `in:` is
+/// read and left to the client (this window is every chat). A query of plain words (no operator,
+/// no quote) ranks exactly as before. A query of operators alone lists the newest chats they pass.
+/// `sinceMs` (the palette's Recent scope) keeps the chats used at or after it, as `since:` does
+/// (the later of the two). With operators or a problem in the query, every message carries
+/// `parsed` (`Parsed::to_json`: `{terms, exclude, role?, agent?, in?, folder?, sinceMs?,
+/// beforeMs?, chips, problems}`, UTF-16 spans into `query`), for the chips a search box draws.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowSpec {
     pub window: String,
@@ -76,6 +95,145 @@ pub struct WindowSpec {
     count: bool,
     /// A query also finds chats by what was said in them.
     content: bool,
+    /// The query's operators (None: plain words, read as before).
+    ops: Option<Ops>,
+    /// Only chats used at or after this time (ms since the epoch; the Recent scope).
+    since_ms: Option<i64>,
+    /// How the query read, sent when it holds an operator or a problem.
+    parsed: Option<Value>,
+}
+
+/// What a query's operators ask of a window ([`WindowSpec`]'s doc).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ops {
+    /// Every term, phrases with their spaces, as written.
+    terms: Vec<String>,
+    /// The quoted terms, lowercased and flattened.
+    phrases: Vec<String>,
+    /// As written; lowercased in `exclude_lower`.
+    exclude: Vec<String>,
+    exclude_lower: Vec<String>,
+    role: Option<ts::Role>,
+    harness: Option<ts::Harness>,
+    /// Lowercased.
+    folder: Option<String>,
+    since_ms: Option<i64>,
+    before_ms: Option<i64>,
+}
+
+impl Ops {
+    fn of(parsed: &ts::Parsed) -> Self {
+        let lower = |t: &str| super::search::flatten(t).to_lowercase();
+        Self {
+            terms: parsed.terms.iter().map(|t| t.text.clone()).collect(),
+            phrases: parsed.terms.iter().filter(|t| t.phrase).map(|t| lower(&t.text)).collect(),
+            exclude: parsed.exclude.clone(),
+            exclude_lower: parsed.exclude.iter().map(|e| lower(e)).collect(),
+            role: parsed.role,
+            harness: parsed.harness,
+            folder: parsed.folder.as_deref().map(|f| f.trim().to_lowercase()),
+            since_ms: parsed.since_ms,
+            before_ms: parsed.before_ms,
+        }
+    }
+}
+
+impl WindowSpec {
+    /// The later of `sinceMs` and the query's `since:`.
+    fn since(&self) -> Option<i64> {
+        ts::syntax::later(self.since_ms, self.ops.as_ref().and_then(|o| o.since_ms))
+    }
+
+    fn before(&self) -> Option<i64> {
+        self.ops.as_ref().and_then(|o| o.before_ms)
+    }
+
+    /// Whether the query's `agent:` and `folder:` keep this chat (always, for plain words).
+    fn keeps(&self, chat: &IndexedChat) -> bool {
+        let Some(ops) = &self.ops else { return true };
+        let entry = &chat.entry;
+        if let Some(harness) = ops.harness {
+            let kind = match harness {
+                ts::Harness::Claude => cmux_chat_index::AdapterKind::ClaudeCode,
+                ts::Harness::Codex => cmux_chat_index::AdapterKind::Codex,
+            };
+            if entry.harness != kind {
+                return false;
+            }
+        }
+        if let Some(folder) = &ops.folder {
+            let Some(cwd) = entry.cwd.as_deref() else { return false };
+            if !cwd.to_lowercase().contains(folder.as_str()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether a time is within `since` (in) and `before` (out).
+    fn within(&self, at: i64) -> bool {
+        self.since().is_none_or(|since| at >= since)
+            && self.before().is_none_or(|before| at < before)
+    }
+
+    /// Whether a chat its title or folder found stays: used within the times, holding no
+    /// excluded word and every phrase in its title or folder.
+    fn titled(&self, chat: &IndexedChat) -> bool {
+        if !self.within(chat.entry.updated_ms) {
+            return false;
+        }
+        let Some(ops) = &self.ops else { return true };
+        if ops.exclude_lower.is_empty() && ops.phrases.is_empty() {
+            return true;
+        }
+        let entry = &chat.entry;
+        let lower = |f: Option<&str>| f.map(|f| super::search::flatten(f).to_lowercase());
+        let (title, cwd) = (lower(entry.title.as_deref()), lower(entry.cwd.as_deref()));
+        let holds = |word: &str| {
+            title.as_deref().is_some_and(|t| t.contains(word))
+                || cwd.as_deref().is_some_and(|c| c.contains(word))
+        };
+        !ops.exclude_lower.iter().any(|w| holds(w)) && ops.phrases.iter().all(|p| holds(p))
+    }
+
+    /// What the content search looks for: the query's words (with operators: its terms, what a
+    /// message must not hold and whose it must be). None: no content search (no words, or only
+    /// tool calls asked, which the held text has none of).
+    fn needle(&self, query: &str) -> Option<Needle> {
+        let Some(ops) = &self.ops else { return Needle::parse(query).ok() };
+        let answers = match ops.role {
+            None => None,
+            Some(ts::Role::User) => Some(false),
+            Some(ts::Role::Assistant) => Some(true),
+            Some(ts::Role::Tool) => return None,
+        };
+        Needle::of_terms(&ops.terms, &ops.exclude, answers).ok()
+    }
+
+    /// What the transcript index is asked: the query's indexable words and its filters.
+    fn ask(&self, query: &str) -> super::deep::Ask {
+        let words: Vec<String> = match &self.ops {
+            Some(ops) => {
+                ops.terms.iter().map(|t| super::search::flatten(t).to_lowercase()).collect()
+            }
+            None => Needle::parse(query).map(|n| n.words().to_vec()).unwrap_or_default(),
+        };
+        let mut ask = super::deep::Ask::words(super::deep::indexable(&words));
+        ask.since_ms = self.since();
+        ask.before_ms = self.before();
+        if let Some(ops) = &self.ops {
+            ask.exclude.clone_from(&ops.exclude);
+            ask.role = ops.role;
+            ask.harness = ops.harness;
+            ask.folder.clone_from(&ops.folder);
+        }
+        ask
+    }
+
+    /// Whether this asks more than the query's plain words (operators, or the Recent scope).
+    fn filtered(&self) -> bool {
+        self.ops.is_some() || self.since_ms.is_some()
+    }
 }
 
 /// The client's choice history: the palette ranker's frecency and the clock it is read at.
@@ -112,7 +270,7 @@ impl WindowSpec {
             .to_owned();
         let mut filter = ChatQuery::from_params(params)?;
         // The query is ranked (`rank`), not the filter's substring match.
-        let query = params
+        let mut query = params
             .get("query")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -165,6 +323,23 @@ impl WindowSpec {
         };
         let count = flag("count")?;
         let content = flag("content")?;
+        let since_ms = match params.get("sinceMs") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_i64().ok_or("sinceMs must be a number (ms since the epoch)")?),
+        };
+        let tz = crate::transcript_search::tz_offset(params)?.unwrap_or(0);
+        let (mut ops, mut parsed) = (None, None);
+        if let Some(typed) = &query {
+            let read = ts::syntax::parse(typed, ts::Clock::now(tz));
+            if !read.chips.is_empty() || !read.problems.is_empty() {
+                parsed = Some(read.to_json());
+            }
+            if !read.chips.is_empty() {
+                let o = Ops::of(&read);
+                query = (!o.terms.is_empty()).then(|| o.terms.join(" "));
+                ops = Some(o);
+            }
+        }
         Ok(Self {
             window,
             generation,
@@ -177,6 +352,9 @@ impl WindowSpec {
             history,
             count,
             content,
+            ops,
+            since_ms,
+            parsed,
         })
     }
 }
@@ -294,7 +472,7 @@ pub fn rows(
     let mut window = WindowRows::default();
     // The index's kept order: a window that stops at its page reads the page, not every chat.
     for chat in index.newest_first() {
-        if !spec.filter.matches(chat) {
+        if !spec.filter.matches(chat) || !spec.keeps(chat) || !spec.titled(chat) {
             continue;
         }
         let key = key_text(&chat.entry.key());
@@ -343,7 +521,7 @@ fn ranked_rows(
     let mut entries = Vec::new();
     let mut folded = HashSet::new();
     for chat in index.newest_first() {
-        if !spec.filter.matches(chat) {
+        if !spec.filter.matches(chat) || !spec.keeps(chat) {
             continue;
         }
         let key = key_text(&chat.entry.key());
@@ -366,7 +544,11 @@ fn ranked_rows(
         ));
         candidates.push((key, chat));
     }
-    let order = ranked(query, entries, spec.history.as_ref().map(|h| (h.now, h.frecency.clone())));
+    let mut order =
+        ranked(query, entries, spec.history.as_ref().map(|h| (h.now, h.frecency.clone())));
+    if spec.filtered() {
+        order.retain(|&i| candidates.get(i).is_some_and(|(_, chat)| spec.titled(chat)));
+    }
     let mut total = order.len();
     let mut rows: Vec<Row> = order
         .iter()
@@ -374,19 +556,34 @@ fn ranked_rows(
         .filter_map(|&i| candidates.get(i))
         .map(|(key, chat)| (key.clone(), row_value(chat, activity)))
         .collect();
-    let needle = text.filter(|_| spec.content).zip(Needle::parse(query).ok());
+    let content = text.filter(|_| spec.content);
+    let needle = content.and_then(|_| spec.needle(query));
+    let asks_index = content.is_some() && (needle.is_some() || spec.ops.is_some());
     let mut filling = false;
-    if let Some((text, needle)) = needle {
-        let found = text.search(&needle);
+    if let Some(text) = content.filter(|_| asks_index) {
+        let empty = std::sync::Arc::default();
+        let found = needle.as_ref().map_or(empty, |needle| text.search(needle));
         // Past the text held (a chat's newest `CHAT_BYTES`): the transcript index's answer, which
         // keeps the window filling until it comes.
-        let (deep, coming) = text.deep_search(&needle);
+        let (deep, coming) = match (&needle, spec.filtered()) {
+            (Some(needle), false) => text.deep_search(needle),
+            _ => text.deep_search_for(&spec.ask(query)),
+        };
         filling = !text.filled() || coming;
         let titled: HashSet<usize> = order.into_iter().collect();
+        // With operators, a match's terms for its snippet and highlights.
+        let shown = needle
+            .clone()
+            .or_else(|| spec.ops.as_ref().and_then(|o| Needle::of_terms(&o.terms, &[], None).ok()));
         // The candidates are in the index's order: newest first.
         for (i, (key, chat)) in candidates.iter().enumerate() {
-            let hit = found.get(key);
-            let far = deep.as_ref().filter(|_| hit.is_none()).and_then(|deep| deep.get(key));
+            // A held message has no time of its own: its chat's stands in.
+            let hit = found.get(key).filter(|_| spec.within(chat.entry.updated_ms));
+            let far = deep
+                .as_ref()
+                .filter(|_| hit.is_none())
+                .and_then(|deep| deep.get(key))
+                .filter(|far| far.at_ms.is_none_or(|at| spec.within(at)));
             if (hit.is_none() && far.is_none()) || titled.contains(&i) {
                 continue;
             }
@@ -395,10 +592,10 @@ fn ranked_rows(
                 continue;
             }
             let mut value = row_value(chat, activity);
-            let said = match (hit, far) {
-                (Some(hit), _) => ChatText::hit(hit, &needle),
-                (None, far) => far.map(|far| ChatText::deep_hit(far, &needle)),
-            };
+            let said = shown.as_ref().and_then(|needle| match (hit, far) {
+                (Some(hit), _) => ChatText::hit(hit, needle),
+                (None, far) => far.map(|far| ChatText::deep_hit(far, needle)),
+            });
             if let (Some(said), Some(object)) = (said, value.as_object_mut()) {
                 object.insert("match".into(), said);
             }
@@ -518,6 +715,9 @@ impl WindowState {
             }
             if next.filling {
                 object.insert("filling".into(), json!(true));
+            }
+            if let Some(parsed) = &self.spec.parsed {
+                object.insert("parsed".into(), parsed.clone());
             }
         }
         self.sent = Some(next);

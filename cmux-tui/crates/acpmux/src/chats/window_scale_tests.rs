@@ -174,8 +174,8 @@ fn a_word_past_the_held_text_comes_from_the_transcript_index_while_filling() {
     let text = text_of(home.path(), &index, chats);
     let old = 7;
     assert!(!holds_word(old, chats));
-    text.deep().set_search(Box::new(move |words| {
-        assert_eq!(words, ["zephyrine".to_owned()]);
+    text.deep().set_search(Box::new(move |ask| {
+        assert_eq!(ask.words, ["zephyrine".to_owned()]);
         let hit = acpmux_transcript_search::Hit {
             session: session_id(old),
             harness: acpmux_transcript_search::Harness::Claude,

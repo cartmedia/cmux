@@ -209,10 +209,14 @@ pub fn table() -> Vec<(&'static str, Ask)> {
         (method::MUX_HISTORY, Run(json!({"sessionId": "$S", "limit": 5}))),
         (method::MUX_SESSION_SEARCH, Run(json!({"sessionId": "$S", "query": "echo"}))),
         // A harness session no transcript holds: the search reads no file and finds nothing.
+        // With operators and the toggles: still a search of a transcript no file holds.
         (
             method::MUX_TRANSCRIPT_SEARCH,
-            Run(json!({"harnessSessionId": "no-such-session", "query": "echo"})),
+            Run(json!({"harnessSessionId": "no-such-session",
+                "query": "echo -x from:me since:7d", "caseSensitive": true, "beforeMs": 1,
+                "tzOffsetMinutes": -480})),
         ),
+        (method::MUX_SEARCH_SYNTAX, Run(json!({"query": "from:me since:", "cursor": 14}))),
         // The same session: the read finds no transcript of it and says so (not found).
         (
             method::MUX_TRANSCRIPT_READ,

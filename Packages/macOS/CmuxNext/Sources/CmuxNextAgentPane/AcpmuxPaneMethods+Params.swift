@@ -171,7 +171,8 @@ nonisolated extension AcpmuxPaneMethods {
         // `before`: a `native_history` cursor, a byte offset into the chat's own transcript.
         "_acpmux/native_history": (["sessionId", "before", "mark"], []),
         // The pane's own chat only: no `host` (peers) or `harnessSessionId` (another transcript).
-        "_acpmux/transcript_search": (["sessionId", "query", "order", "window", "limit", "offset", "context"], []),
+        "_acpmux/transcript_search": (["sessionId", "query", "order", "window", "limit", "offset", "context", "caseSensitive", "sinceMs", "beforeMs", "tzOffsetMinutes"], []),
+        "_acpmux/search_syntax": (["query", "cursor", "tzOffsetMinutes"], []),
         "_acpmux/subagent_stop": (["sessionId", "subagentSessionId"], []),
         // `peerSessionId`: one of that chat's paused pairs, a selector only (acpmux checks the pair has the chat).
         "_acpmux/agent_pair_resume": (["sessionId", "peerSessionId"], []),

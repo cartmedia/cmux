@@ -172,6 +172,8 @@ pub const CAPABILITIES: &[Capability] = &[
     // What was said in every Claude Code and Codex transcript, here and on peers
     // (`transcript_search.rs`).
     Capability { id: "transcript-search-v1", wire: &[method::MUX_TRANSCRIPT_SEARCH] },
+    // The search syntax: how a query reads and its operator completions (`transcript_search.rs`).
+    Capability { id: "search-syntax-v1", wire: &[method::MUX_SEARCH_SYNTAX] },
     // The text around a transcript search hit, here or on a peer (`transcript_read.rs`).
     Capability { id: "transcript-read-v1", wire: &[method::MUX_TRANSCRIPT_READ] },
     // What turns cost, indexed by day and session (`hub/ledger`).
