@@ -45,7 +45,8 @@
 # Each side gets one copy of the app and one home. The priming launch makes the home's state (a person's second
 # launch on), then every measured launch is a relaunch through LaunchServices, activated, as a Dock click is.
 # scripts/measure/launch-ready.swift times each one: finished_launching (the Dock's bounce ends), the first
-# on-screen window, and the app's own marks. Prints LR-RUN per launch, LR-MEDIAN per side, LR-PROFILE with profile=1.
+# on-screen window, and the app's own marks. Prints LR-RUN per launch, LR-MEDIAN per side, LR-PROFILE with profile=1,
+# LR-SIGN per side at install and at the end (signature, executable size, link count, ctime).
 # Each launch waits (at most 10 min, LR-LOAD-WAIT) until the Mac's 1-minute load is under 8, then its row carries
 # load_1m, the load just before it (LR-MEDIAN: the side's highest).
 # Each side has its own app defaults (side_defaults, through launch-ready-defaults.py); the account's are set aside for
@@ -203,6 +204,7 @@ main() {
     local info="$out/$side/$(basename "$found")/Contents/Info.plist"
     [[ -f "$info" ]] || { echo "LR-FAIL $side $(basename "$found") has no Contents/Info.plist"; exit 3; }
     echo "LR app $side $(basename "$found") $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info" 2>/dev/null)"
+    exe_record "$out" "$side" install
     defaults_aside "$out" "$out/$side/$(basename "$found")" || { echo "LR-FAIL $side defaults not set aside"; exit 3; }
     if [[ "$LR_CASE" == update && "$side" == base ]]; then continue; fi # the old copy: launched at head's path below
     if [[ "$LR_CASE" == update ]]; then old_copy "$out" "$side" || rc=1; fi
@@ -222,6 +224,7 @@ main() {
       probe "$out" "$side" "run$i" 6 "$([[ $profile == 1 && $i == 1 ]] && echo 1 || echo 0)" || rc=1
     done
   done
+  for side in "${sides[@]}"; do exe_record "$out" "$side" end; done
   # Every process a launch left (the daemons a quit keeps): only ones started from this run's copies.
   end_left "$out/"
   # Each case's expectation, LR-REOPENED, LR-SURFACE and LR-SURFACE-DIFF: launch-ready-summary.py.
@@ -229,6 +232,20 @@ main() {
     --snapshot "$LR_SNAPSHOT" --front "$LR_FRONT" --out "$out"
   tar -czf "$out.tgz" -C "$out" --exclude '*.dmg' --exclude '*.app' --exclude '*.trace' . 2>/dev/null && mv "$out.tgz" "$out/report.tgz"
   exit "$rc"
+}
+
+# exe_record OUT SIDE WHEN: how SIDE's copy is signed and what its main executable is, as one LR-SIGN line: codesign's
+# signature kind, flags and team, the executable's size, and its link count and ctime. WHEN is install or end: a
+# launch that hard-links the executable (Chromium's code-sign clone) raises the link count and moves the ctime, and
+# macOS then scans the executable again before the next launch can start, so an A/B whose arms differ there is
+# timing that scan.
+exe_record() {
+  local out="$1" side="$2" when="$3" app exe sig
+  app="$(find "$out/$side" -maxdepth 1 -name '*.app' | head -1)"
+  [[ -n "$app" ]] || { echo "LR-SIGN $side $when no app"; return 0; }
+  exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist" 2>/dev/null)"
+  sig="$(codesign -dv "$app" 2>&1 | grep -E '^(Signature|CodeDirectory|TeamIdentifier|Format)' | sed -E 's/ +/ /g' | tr '\n' ';')"
+  echo "LR-SIGN $side $when exe_bytes=$(stat -f %z "$exe" 2>/dev/null) links=$(stat -f %l "$exe" 2>/dev/null) ctime=$(stat -f %c "$exe" 2>/dev/null) $sig"
 }
 
 # probe OUT SIDE LABEL SETTLE_S PROFILE: one launch of SIDE's copy with SIDE's home, in the console session; with
