@@ -577,3 +577,42 @@ fn c_abi_a_reply_is_cut_to_its_shape() {
     assert_eq!(code, NO_SHAPE);
     assert!(out.ptr.is_null());
 }
+
+/// The pane's waiting line through the C ABI (`service_wait`, src/service_wait.rs): a daemon that
+/// listens and answers late is busy, with no Restart until a long wait; one that neither runs nor
+/// listens is down, with Restart at once (Leo, 2026-11-18: "i cant connect to agent service?").
+#[test]
+fn service_wait_says_busy_or_down() {
+    let none = std::ptr::null();
+    let busy = call(
+        none,
+        "service_wait",
+        json!({"process_alive": true, "socket_accepts": true, "waited_ms": 70_000}),
+    );
+    assert_eq!(
+        busy.unwrap(),
+        json!({"state": "busy", "restart": false, "restart_after_ms": 180_000})
+    );
+    let long = call(
+        none,
+        "service_wait",
+        json!({"process_alive": true, "socket_accepts": true, "waited_ms": 180_000}),
+    );
+    assert_eq!(long.unwrap()["restart"], true);
+    let starting = call(
+        none,
+        "service_wait",
+        json!({"process_alive": true, "socket_accepts": false, "waited_ms": 30_000}),
+    );
+    assert_eq!(starting.unwrap()["state"], "starting");
+    let down = call(
+        none,
+        "service_wait",
+        json!({"process_alive": false, "socket_accepts": false, "waited_ms": 0}),
+    );
+    assert_eq!(
+        down.unwrap(),
+        json!({"state": "down", "restart": true, "restart_after_ms": 180_000})
+    );
+    assert_eq!(call(none, "service_wait", json!({"process_alive": true})), Err(ERR_INVALID));
+}
