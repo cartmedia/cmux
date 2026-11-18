@@ -19,6 +19,6 @@ CMUX_GALLERY_OUT_DIR="$work/gallery" bun run gallery:build >/dev/null
 cd "$root/scripts/gallery-matrix"
 bun install --frozen-lockfile >/dev/null
 "$root/scripts/ci/ensure-system-chrome.sh" >/dev/null
-CMUX_GALLERY_IN_VM=1 CMUX_GALLERY_RECORD_VIDEO=1 bun runner.ts --manifest "$work/manifest.json" --gallery-dir "$work/gallery" \
+CMUX_GALLERY_IN_VM=1 CMUX_GALLERY_RECORD_VIDEO=1 CMUX_GALLERY_ECHO_TRACE="${TRACE:-0}" bun runner.ts --manifest "$work/manifest.json" --gallery-dir "$work/gallery" \
   --output-dir "$out" --engines chromium || true
 bun undeclared-table.ts --results "$out" | tee "$out/undeclared-table.md"

@@ -73,6 +73,30 @@ const settleFrames = (ctx: PlayContext, frames: number) => {
   });
 };
 
+
+/** Logs `frames` painted frames from now as `motion-trace` console lines: the scroller and the last turns' rows,
+ *  where they drew. Read only when the runner echoes them (CMUX_GALLERY_ECHO_TRACE=1, undeclared-run.sh). */
+const trace = (ctx: PlayContext, label: string, frames = 24) => {
+  const doc = ctx.document;
+  const view = doc.defaultView!;
+  const started = view.performance.now();
+  let frame = 0;
+  const tick = () => {
+    const scroller = doc.querySelector<HTMLElement>(".acpmux-scroll");
+    const rows = [...doc.querySelectorAll<HTMLElement>("[data-row-id]")]
+      .filter((row) => /motion-(7|8)-/.test(row.dataset.rowId ?? ""))
+      .map((row) => {
+        const box = row.getBoundingClientRect();
+        return `${row.dataset.rowId}:${box.top.toFixed(1)}/${box.height.toFixed(1)}`;
+      });
+    console.log(
+      `motion-trace ${label} f${frame} t${(view.performance.now() - started).toFixed(0)} w${scroller?.clientWidth} st${scroller?.scrollTop.toFixed(1)} sh${scroller?.scrollHeight} ${rows.join(" ")}`,
+    );
+    frame += 1;
+    if (frame < frames) view.requestAnimationFrame(tick);
+  };
+  tick();
+};
 /** The page leaves view and comes back, as a tab dragged to another pane does. */
 const setVisible = (ctx: PlayContext, visible: boolean) => {
   const doc = ctx.document;
@@ -139,8 +163,10 @@ export default agentPaneEntry({
       snapshot: finished(),
       play: async (ctx) => {
         await atLatest(ctx);
+        trace(ctx, "split-380");
         await ctx.resize(380);
         await settleFrames(ctx, 20);
+        trace(ctx, "split-760");
         await ctx.resize(760);
         await settleFrames(ctx, 20);
       },
@@ -160,6 +186,7 @@ export default agentPaneEntry({
       play: async (ctx) => {
         await atLatest(ctx);
         setVisible(ctx, false);
+        trace(ctx, "tab-520", 40);
         await ctx.resize(520);
         setVisible(ctx, true);
         await settleFrames(ctx, 30);
