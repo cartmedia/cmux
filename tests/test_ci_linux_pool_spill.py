@@ -162,7 +162,7 @@ class DownSpill(unittest.TestCase):
         self.assertEqual((member, record), (SIXTEEN, None))
         self.assertTrue(any("no later live member has room" in line for line in lines))
         # Not much faster than the backlog it would leave: stay.
-        close = self.load({"sixteen": 20, "eight": 10}, sixteen=60, eight=20)
+        close = self.load({"sixteen": 20, "thirty_two": 20, "eight": 10}, sixteen=60, thirty_two=40, eight=20)
         self.assertEqual(self.choose(close)[:2], (SIXTEEN, None))
 
     def test_never_below_the_floor_and_never_onto_a_dead_size(self):
