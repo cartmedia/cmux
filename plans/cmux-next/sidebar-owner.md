@@ -1,5 +1,13 @@
 # cmux-next sidebar: owner note
 
+- 2026-11-18 (lane/custom-hovercard-draws): Sidebar-Look: Leo asked for thoughtfully designed looks people can make on
+  their own. The user's hover card (`cmux.hovercard/1` in `~/.config/cmux/customize/`) draws as the workspace card
+  opens. Since Show details came (#28897), `WorkspaceHoverCardView.updateDetailsVisibility` hid the custom slot and its
+  error while the details were collapsed, the state every card opens in: a working card never drew and a broken one
+  showed no "Custom card error", only the built-in card. The user's card now replaces the built-in card's rows in both
+  states (the tab list stays under it), a failed card's error shows on the collapsed card, and the card takes the
+  pointer whenever it shows. Regression: `WorkspaceHoverCardCustomCardTests`.
+
 - 2026-11-18 (a590, grid base red): Sidebar-Look: an unread dot beside a status mark sits one column in again, as before
   #44449. d8917c9 (#44449) made the trailing pitch the control plus a tenth of it (17.6 or 20.53 pt), and
   `SidebarColumns` rounded the pitches back from the trailing edge up with no tolerance, so one pitch could count as two
