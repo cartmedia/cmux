@@ -1226,7 +1226,21 @@ fn home_inbox_after_an_inbox_change_reads_no_cloud_page() {
     let (mux, client, backend) = cloud_mux();
     set_role_for_test(&mux, client, "main");
     set_verified_app_for_test(&mux, client, true);
-    sign_in(&mux, client);
+    // A token whose `sub` names the account, as the app's lease carries:
+    // the inbox stream's events are that account's.
+    let claims = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json!({"sub": ME}).to_string())
+    };
+    let set = run(
+        &mux,
+        client,
+        json!({"cmd":"cloud-session-set","api_base_url":"https://api.cmux.test",
+               "access_token":format!("e30.{claims}.sig"),"expires_at":4_102_444_800_000_u64,
+               "client_version":"0.70.0"}),
+    )
+    .unwrap();
+    assert_eq!(set["state"], "active");
     let events = mux.subscribe();
     let wire = backend.wire();
     let stream = format!("inbox:{ME}");
@@ -1281,6 +1295,10 @@ fn home_inbox_after_an_inbox_change_reads_no_cloud_page() {
         seen.extend(cloud_events(&events));
         seen.iter().any(|event| event["event"] == "cloud-inbox-changed")
     });
+    // The Cloud would answer a read again (the base read every page per
+    // change); the change's own entry must be enough.
+    let again = inbox_page(&["conv_a", "conv_b", "conv_c", "conv_d"], Value::Null, "8");
+    backend.reply("/v1/read", 200, again);
     assert_eq!(home(2), ["conv_a", "conv_b", "conv_c", "conv_d"]);
     assert_eq!(backend.posted().len(), pages, "a read after a change listed Cloud pages again");
     mux.cloud_conversations().unwrap().shutdown();
