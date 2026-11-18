@@ -2446,7 +2446,10 @@ function AcpmuxPane({ initialChat }: { initialChat?: InitialChat }) {
   const turnWorking = snapshot.isWorking;
   // While a reply streams, the transcript grows at its end: a declared move of its rows
   // (schemas/layout-motion/contract.json `stream-append`), judged by the layout-motion audit.
-  useEffect(() => (turnWorking ? declareMove({ event: "stream-append", scope: "all", by: "turn working" }) : undefined), [turnWorking]);
+  useEffect(
+    () => (turnWorking ? declareMove({ event: "stream-append", scope: "all", by: "turn working" }) : undefined),
+    [turnWorking],
+  );
   // Only once the chat's summary says where it runs: a remote chat never shows this Mac's rules.
   const rulesLocal = snapshot.summary !== undefined && healthLocal;
   useEffect(() => {

@@ -19,7 +19,13 @@ export type JudgeSample = {
   before?: boolean;
 };
 
-export type JudgeDeclaration = { key: number; event: MotionEvent; scope: "all" | "targets"; once?: boolean; by?: string };
+export type JudgeDeclaration = {
+  key: number;
+  event: MotionEvent;
+  scope: "all" | "targets";
+  once?: boolean;
+  by?: string;
+};
 
 export type JudgeFrame = { samples: Map<number | string, JudgeSample>; declared: readonly JudgeDeclaration[] };
 
@@ -67,7 +73,10 @@ export function judgeMotion(frames: readonly JudgeFrame[]): MotionVerdict {
     const previous = frames[index - 1]!.samples;
     const { samples, declared } = frames[index]!;
     // A move made in the frame a declaration ends is still the declaration's (it laid out that frame).
-    const open = [...declared, ...frames[index - 1]!.declared.filter((was) => !declared.some((now) => now.key === was.key))];
+    const open = [
+      ...declared,
+      ...frames[index - 1]!.declared.filter((was) => !declared.some((now) => now.key === was.key)),
+    ];
     for (const [id, now] of samples) {
       const was = previous.get(id);
       if (!was) {
