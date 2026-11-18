@@ -6279,6 +6279,7 @@ function AcpmuxPane({ initialChat }: { initialChat?: InitialChat }) {
         : {
             key: shownSessionId,
             search: (search) => directClient.current?.searchTranscript(search) ?? Promise.resolve(undefined),
+            syntax: (ask) => directClient.current?.searchSyntax(ask) ?? Promise.resolve(undefined),
             window: () => rowsWindow(counted.current.transcriptRows, transcriptInView.current?.()),
             ...(findHistoryFrom !== undefined && { holdsSeq: (seq: number) => findHistoryFrom <= seq }),
             rowsOfMessage: (messageId) => directClient.current?.rowsOfMessage(messageId) ?? [],

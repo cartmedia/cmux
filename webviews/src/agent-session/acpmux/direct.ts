@@ -243,6 +243,7 @@ import {
 } from "./conversation/promptCoach";
 import { promptCoachDismissed, rememberPromptCoachDismissed } from "./conversation/promptCoachDismissed";
 import { readAnswer, type IndexAnswer, type IndexSearch } from "./conversation/findIndex";
+import { readSyntax, type SyntaxAnswer, type SyntaxAsk } from "./conversation/searchSyntax";
 import { promptCoachEnabled } from "./chatDisplay";
 import {
   PRESET_APPROVAL,
@@ -534,6 +535,9 @@ const FIND_LOAD_PAGES = 40;
 /// How long Find in Chat waits on the transcript index, and the text it asks for around a hit.
 const TRANSCRIPT_SEARCH_MS = 10_000;
 const TRANSCRIPT_SEARCH_CONTEXT = 120;
+/// `_acpmux/search_syntax` answers in under a millisecond on the daemon; past this the bar keeps
+/// its last reading.
+const SEARCH_SYNTAX_MS = 3_000;
 const INDEXED_PAGE_LIMIT = 400;
 const INDEXED_PAGE_CACHE_LIMIT = 5;
 /// Gap pages (`fillIndexedGaps`) merged per redraw after the first: each redraw refolds from the gap
@@ -15496,7 +15500,7 @@ export class AcpmuxDirectClient {
         { ...search, sessionId, order: "transcript", context: TRANSCRIPT_SEARCH_CONTEXT },
         TRANSCRIPT_SEARCH_MS,
       );
-      return sessionId === this.selectedSessionId ? readAnswer(raw) : undefined;
+      return sessionId === this.selectedSessionId ? readAnswer(raw, search.query) : undefined;
     } catch (error) {
       const code = (error as { code?: unknown } | undefined)?.code;
       if (
@@ -15510,6 +15514,30 @@ export class AcpmuxDirectClient {
   }
   /// The connection that answered it has no transcript index (`searchTranscript`).
   private transcriptSearchUnserved?: WebSocket;
+
+  /// Find in Chat's search operators (`_acpmux/search_syntax`, conversation/searchSyntax.ts): the
+  /// daemon's reading of the bar's text and its suggestions for the token at the caret. Pure on the
+  /// daemon (no index, no I/O). Undefined when it has no syntax to ask (an acpmux before operators,
+  /// a host that does not relay it), which this connection then never asks again: the bar draws no
+  /// options or chips and matches as before.
+  async searchSyntax(ask: SyntaxAsk): Promise<SyntaxAnswer | undefined> {
+    if (!this.socket || this.searchSyntaxUnserved === this.socket) return undefined;
+    try {
+      const raw = await this.request("_acpmux/search_syntax", { ...ask }, SEARCH_SYNTAX_MS);
+      return readSyntax(raw, ask.query);
+    } catch (error) {
+      const code = (error as { code?: unknown } | undefined)?.code;
+      if (
+        code === METHOD_NOT_FOUND ||
+        code === "transport.method_refused" ||
+        (error instanceof AcpmuxRpcError && refusedByHost(error))
+      )
+        this.searchSyntaxUnserved = this.socket;
+      return undefined;
+    }
+  }
+  /// The connection that answered it has no search syntax (`searchSyntax`).
+  private searchSyntaxUnserved?: WebSocket;
 
   /// Whether the published rows hold the record at `seq` (Find's index hits, findIndex.ts `hitLoaded`).
   holdsSeq(seq: number): boolean {
