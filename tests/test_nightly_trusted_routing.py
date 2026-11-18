@@ -55,8 +55,8 @@ OUR_LABELS = {NIGHTLY_ONLY, NIGHTLY_SLOT, SIGNING_SLOT, HOSTED}
 # override): an upload with the release App key that held the whole signing Mac.
 HOSTED_SECRET_JOBS = ('sentry-dsyms-nightly', 'sign-release-notes', 'publish-release-notes', 'publish-nightly-reel',
                       'publish-nightly-next-github')
-# The secret-free runner preflight ahead of decide: it judges the routing labels, so it never waits on one of them
-# (test_nightly_owned_minis_only.HOSTED_PREFLIGHT_JOBS has its reason).
+# The secret-free runner preflight ahead of decide: its one credential is its GITHUB_TOKEN's issues: write. It runs on
+# the dedicated nightly Macs by their literal label (no longer GitHub-hosted, 2026-11-18; nightly.yml says why).
 HOSTED_PREFLIGHT_JOBS = ('runner-preflight',)
 # On our minis for nightly-next only; classic and RC keep GitHub-hosted Ubuntu, as their release uploads may wait out
 # the rate limit for 360 min (test_nightly_owned_minis_only.NIGHTLY_NEXT_ONLY_OWNED).
@@ -139,8 +139,8 @@ def credentialed_control_jobs(doc):
             cells = [cell for cell in cells if 'ubuntu' in cell and 'macos' not in cell]
             if not cells or all(cell.rstrip().endswith(f"|| '{SIGNING_SLOT}' }}}}") for cell in cells):
                 continue
-        # The hosted preflight's one credential is its own GITHUB_TOKEN's issues: write, for the failure notice
-        # (test_nightly_owned_minis_only pins it to that and no secret); it stays on hosted Ubuntu by design.
+        # The preflight's one credential is its own GITHUB_TOKEN's issues: write, for the failure notice
+        # (test_nightly_runner_preflight pins it to that and no secret); its route is the dedicated nightly label.
         if name in HOSTED_SECRET_JOBS or name in HOSTED_PREFLIGHT_JOBS:
             continue
         if holds_credential(job):
@@ -584,7 +584,7 @@ class NightlyTrustedRouting(unittest.TestCase):
                                    'github.ref': 'refs/heads/nightly-next',
                                    'vars.CI_CLOUD_OVERFLOW_SAVED': '{"probe":"x"}',
                                    'needs.prepare-nightly-variant-primary.result': primary}
-                        allowed = {HOSTED} if name in HOSTED_SECRET_JOBS or name in HOSTED_PREFLIGHT_JOBS else OUR_LABELS - {HOSTED}
+                        allowed = {HOSTED} if name in HOSTED_SECRET_JOBS else OUR_LABELS - {HOSTED}
                         with self.subTest(job=name, runner=runner, attempt=attempt, primary=primary):
                             self.assertIn(evaluate(parse_expression(source), context), allowed)
                         if name in NIGHTLY_NEXT_ONLY_OWNED:

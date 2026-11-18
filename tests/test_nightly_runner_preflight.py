@@ -217,7 +217,9 @@ class Wiring(unittest.TestCase):
         self.assertEqual(self.JOBS["decide"]["needs"], "runner-preflight")
         self.assertEqual(job["if"], self.JOBS["decide"]["if"], "the preflight runs exactly when decide would")
         runs_on = workflow_jobs.single_runs_on(job)
-        self.assertEqual(runs_on, "${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || 'ubuntu-24.04' }}")
+        # The dedicated nightly Macs by their literal label (preflight.DEDICATED), never a routing variable it judges:
+        # GitHub-hosted Ubuntu held run 44207617943's preflight from 00:24Z on 2026-11-18 behind ~4,300 queued jobs.
+        self.assertEqual(runs_on, "${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || '%s' }}" % preflight.DEDICATED)
         self.assertNotIn("vars.", runs_on)
         self.assertEqual(job["permissions"], {"issues": "write"})  # the failure incident only
         self.assertLessEqual(job["timeout-minutes"], 5)

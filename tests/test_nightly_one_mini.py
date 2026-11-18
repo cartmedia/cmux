@@ -53,6 +53,8 @@ def want(name: str, ref: str = "refs/heads/nightly-next") -> str:
         return SIGN
     if name == "build-nightly-app":
         return BUILDER
+    if name == "runner-preflight":
+        return "glaeda-nightly-only-m4pro"  # the literal dedicated label: it judges CI_NIGHTLY_MINI, so never waits on it
     return HOSTED if name in HOSTED_TAIL_JOBS or name in HOSTED_LOOP_JOBS or name in HOSTED_PREFLIGHT_JOBS else MINI
 
 

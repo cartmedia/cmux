@@ -84,10 +84,9 @@ HOSTED_LOOP_JOBS = {
 # job, decide first, sat queued for 3+ h while the dedicated nightly Macs were idle. It holds no secret and reads only
 # vars.CI_RUNNER_STATE (scripts/ci/nightly_runner_preflight.py, tests/test_nightly_runner_preflight.py). Its cost: a
 # hosted queue delays decide by that queue's wait.
-HOSTED_PREFLIGHT_JOBS = {
-    "runner-preflight": "fails the run in minutes when its routing label has no online runner; on that label it "
-                        "would itself wait for hours",
-}
+# Empty since 2026-11-18: runner-preflight runs on the dedicated nightly Macs by their literal label, because hosted
+# Ubuntu held run 44207617943's preflight from 00:24Z behind ~4,300 queued jobs while those Macs were idle.
+HOSTED_PREFLIGHT_JOBS: dict[str, str] = {}
 # Jobs on our minis for nightly-next only. Every other track (classic, RC) goes GitHub-hosted through this
 # short-circuit, as before #38596: its release uploads may wait out the API rate limit for up to 360 min, which must
 # not hold the exclusive signing Mac. job -> why.
