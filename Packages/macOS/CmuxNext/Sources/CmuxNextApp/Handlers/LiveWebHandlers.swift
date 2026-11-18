@@ -26,6 +26,9 @@ enum LiveWebHandlers {
     static func bind(into registry: ActionRegistry, context: AppActionContext) {
         let bundled = context.services.bundledCLI
         Task { _ = await bundled.resolve() } // task-owner: none; one bounded file read whose answer bundled keeps
+        // Experiments are never left hanging: at launch, every layer past its bound turns off
+        // (Leo, 2026-11-18: "Always do these; experiments shouldn't be left hanging like that").
+        Task { _ = await BundledCLIRun.expireStaleLayers(bundled) } // task-owner: none; one bounded CLI run
         let noCLI: @MainActor () -> String? = { bundled.known == nil ? LiveWebStrings.noCLI : nil }
         registry.bindEffect(startID, unavailable: noCLI, effect: { invocation in
             guard let cli = bundled.known else { return .refused(LiveWebStrings.noCLI) }
