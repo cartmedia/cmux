@@ -64,5 +64,3 @@ export class CountingPageClient implements PageClient {
 export const settle = async (rounds = 5): Promise<void> => {
   for (let round = 0; round < rounds; round += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 };
-
-export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

@@ -10,7 +10,7 @@
 // The stand-in host counts each op's calls and reply bytes (test/support/countingPageClient.ts).
 import { afterAll, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
-import { CountingPageClient, settle, sleep } from "./support/countingPageClient";
+import { CountingPageClient, settle } from "./support/countingPageClient";
 import { FeedDaemon, historyAnswer, historyEntries } from "./support/deltaFixtures";
 
 const dom = new JSDOM("<!doctype html>", { url: "http://localhost/" });
@@ -47,7 +47,6 @@ test("a hidden History page reads nothing per history-changed, and once when it 
   show("hidden");
   for (let index = 0; index < 20; index += 1) client.emit(CHANGED, { revision: index, kinds: ["agent"] });
   await settle();
-  await sleep(80);
   expect(client.count(LIST).calls, "reads while hidden").toBe(0);
   show("visible");
   await settle();
@@ -62,7 +61,6 @@ test("a history-changed of a kind the filter does not show reads nothing", async
   client.reset();
   for (let index = 0; index < 20; index += 1) client.emit(CHANGED, { revision: index, kinds: ["agent", "closed"] });
   await settle();
-  await sleep(80);
   expect(client.count(LIST).calls).toBe(0);
   client.emit(CHANGED, { revision: 99, kinds: ["command"] });
   await settle();
@@ -75,7 +73,9 @@ test("a burst of history-changed reads once now and once after the gap", async (
   for (let index = 0; index < 8; index += 1) client.emit(CHANGED, { revision: index, kinds: ["agent"] });
   await settle();
   expect(client.count(LIST).calls, "the first change reads at once").toBe(1);
-  await sleep(120);
+  // fixed-wait: the gap itself is under test; this timer is due after the store's 60 ms one, so it
+  // always fires second, however late a loaded runner wakes both.
+  await new Promise((resolve) => setTimeout(resolve, 120));
   await settle();
   expect(client.count(LIST).calls, "one trailing read takes the rest").toBe(2);
   stop();

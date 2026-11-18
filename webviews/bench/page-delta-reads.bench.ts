@@ -16,8 +16,11 @@
  *   bun bench/page-delta-reads.bench.ts
  */
 import { JSDOM } from "jsdom";
-import { CountingPageClient, settle, sleep } from "../test/support/countingPageClient";
+import { CountingPageClient, settle } from "../test/support/countingPageClient";
 import { FeedDaemon, historyAnswer, historyEntries } from "../test/support/deltaFixtures";
+
+// The bench runs on the wall clock: 4 events a second against the page's real 1 s gap.
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const dom = new JSDOM("<!doctype html>", { url: "http://localhost/" });
 let visibility: DocumentVisibilityState = "visible";
