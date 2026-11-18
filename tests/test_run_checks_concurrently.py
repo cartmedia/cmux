@@ -8,6 +8,7 @@ whole and in order, and any failure fails the step by name.
 """
 
 import os
+import sys
 import subprocess
 import tempfile
 import time
@@ -70,8 +71,10 @@ class RunChecksConcurrently(unittest.TestCase):
                      if "run-checks-concurrently.sh --start" in str(s.get("run", "")))
         commands = [line.strip() for line in start["run"].split("<<'CHECKS'", 1)[1].splitlines()
                     if line.strip() and not line.strip().startswith(("[", "#"))]
-        self.assertEqual(commands[0], "python3 tests/test_cmux_next_prepush_gate.py")
-        self.assertEqual(commands.count("python3 tests/test_cmux_next_prepush_gate.py"), 1)
+        # Its four parts (tests/unittest_shard.py) start first, each once, and together cover it.
+        parts = [f"python3 tests/test_cmux_next_prepush_gate.py --shard {i}/4" for i in range(1, 5)]
+        self.assertEqual(commands[:4], parts)
+        self.assertEqual([c for c in commands if "test_cmux_next_prepush_gate.py" in c], parts)
 
     def test_skips_blank_lines_and_comments(self):
         result = run("\n  # a note\n  echo only\n")
@@ -148,6 +151,38 @@ class APoolDeadlineEndsInAVerdict(unittest.TestCase):
         # The job clock starts when the runner writes the event file (Set up job), before the runner hook's wait.
         self.assertIn('"$GITHUB_EVENT_PATH"', start["run"])
         self.assertIn("POOL_TAIL_SECONDS", start["run"])
+
+
+class UnittestShardsCoverTheFile(unittest.TestCase):
+    """tests/unittest_shard.py: the N parts of a file run every test exactly once, and no flag runs them all."""
+
+    def test_parts_are_disjoint_and_cover_every_test(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "test_seven.py"
+            cases = "".join(f"    def test_{n}(self):\n        pass\n" for n in range(7))
+            target.write_text(
+                "import importlib.util, sys, unittest\n"
+                f"spec = importlib.util.spec_from_file_location('unittest_shard', {str(ROOT / 'tests/unittest_shard.py')!r})\n"
+                "shard = importlib.util.module_from_spec(spec); spec.loader.exec_module(shard)\n"
+                f"class A(unittest.TestCase):\n{cases}class B(unittest.TestCase):\n{cases}"
+                "if __name__ == '__main__':\n    shard.main()\n", encoding="utf-8")
+
+            def ran(*args):
+                done = subprocess.run([sys.executable, "-I", str(target), "-v", *args], capture_output=True,
+                                      text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                return [line.split(" ...")[0] for line in done.stderr.splitlines() if " ... ok" in line]
+
+            whole = ran()
+            self.assertEqual(len(whole), 14)
+            parts = [ran("--shard", f"{i}/3") for i in range(1, 4)]
+            self.assertEqual(sorted(sum(parts, [])), sorted(whole))
+            self.assertTrue(all(4 <= len(part) <= 5 for part in parts), parts)
+            self.assertEqual(ran("--shard=2/3"), parts[1])
+            for bad in ("0/3", "4/3", "x", "1/0"):
+                done = subprocess.run([sys.executable, "-I", str(target), "--shard", bad], capture_output=True,
+                                      text=True, timeout=60)
+                self.assertEqual(done.returncode, 2, bad)
 
 
 if __name__ == "__main__":
