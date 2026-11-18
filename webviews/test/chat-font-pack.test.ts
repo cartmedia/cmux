@@ -78,6 +78,7 @@ describe("with no pack keys", () => {
       "--cv-font": null,
       // New, and unset: replies keep --cv-font (conversation.css falls back to it).
       "--cv-reply-font": null,
+      "--cv-reply-tracking": null,
       "--cv-font-size": null,
       "--cv-base-font-size": null,
       "--cv-base-line-height": null,
@@ -118,6 +119,11 @@ describe("the pack's families", () => {
     expect(variables["--font-ui"]).toBe(`"Folio Sans", "Avenir Next", sans-serif, ${SYSTEM}`);
   });
 
+  test("every name but a generic keyword is quoted, so an odd name keeps the stack valid", () => {
+    const variables = chatDisplayVariables(resolveChatDisplay({ [UI_FAMILY_KEY]: "1942, Foo's Sans, ui-serif, serif" }));
+    expect(variables["--font-ui"]).toBe(`"1942", "Foo's Sans", ui-serif, serif, ${SYSTEM}`);
+  });
+
   test("an unsafe family is dropped and the Interface Font draws", () => {
     for (const bad of ['Folio"; } body { color: red', "a{b}", "", 12]) {
       const display = resolveChatDisplay({ [UI_FAMILY_KEY]: bad, [PROSE_FAMILY_KEY]: bad, [CHAT_UI_FONT_KEY]: "verdana" });
@@ -132,6 +138,8 @@ describe("the pack's families", () => {
     const display = resolveChatDisplay({ [PROSE_FAMILY_KEY]: "Folio Serif", "agentPane.display.font.preset": "mono" });
     const variables = chatDisplayVariables(display);
     expect(variables["--cv-reply-font"]).toBe('"Folio Serif", var(--cv-font)');
+    // At its designed spacing, whatever the Interface Font tracks.
+    expect(variables["--cv-reply-tracking"]).toBe("0px");
     // Prompts, cards and chrome keep the chat's font.
     expect(variables["--cv-font"]).toBe("var(--cv-mono)");
     expect(variables["--font-ui"]).toBeNull();
@@ -199,7 +207,8 @@ describe("the pack's faces", () => {
     const before = chatDisplay();
     finish();
     await settle();
-    expect(currentChatMetrics().measureFont).toBe(`14px "Folio Sans", ${SYSTEM}`);
+    const loadedFont = currentChatMetrics().measureFont;
+    expect(loadedFont).toMatch(/^14px "Folio Sans", "cmux-pack-\d+", -apple-system/);
     // The same values under a new identity: App.tsx's `measuredLook` measures every row again.
     expect(chatDisplay()).not.toBe(before);
     expect(chatDisplay()).toEqual(before);
@@ -209,7 +218,7 @@ describe("the pack's faces", () => {
     setChatDisplay({ [UI_FAMILY_KEY]: "Folio Sans", [CHAT_FONT_FACES_KEY]: faces, "agentPane.display.font.size": 15 });
     setChatDisplay({ [UI_FAMILY_KEY]: "Folio Sans", [CHAT_FONT_FACES_KEY]: { ...faces }, "agentPane.display.font.size": 15 });
     expect(loads.length).toBe(1);
-    expect(currentChatMetrics().measureFont).toBe(`15px "Folio Sans", ${SYSTEM}`);
+    expect(currentChatMetrics().measureFont).toBe(loadedFont.replace("14px", "15px"));
 
     // A new map replaces the faces in the same style.
     setChatDisplay({
@@ -222,12 +231,16 @@ describe("the pack's faces", () => {
     expect(currentChatMetrics().replyMeasureFont).toBe(`14px ${SYSTEM}`);
     finish();
     await settle();
-    expect(currentChatMetrics().replyMeasureFont).toBe(`14px "Folio Serif", "Folio Sans", ${SYSTEM}`);
+    expect(currentChatMetrics().replyMeasureFont).toMatch(
+      /^14px "Folio Serif", "cmux-pack-\d+", "Folio Sans", "cmux-pack-\d+", -apple-system/,
+    );
 
-    // Emptied: the style goes, and the families measure as installed ones.
+    // Emptied: the style goes, and the families measure as installed ones, under a font string no
+    // face measured before, so no cache hands back the pack face's widths.
     setChatDisplay({ [UI_FAMILY_KEY]: "Folio Sans" });
     expect(style()).toBeNull();
-    expect(currentChatMetrics().measureFont).toBe(`14px "Folio Sans", ${SYSTEM}`);
+    expect(currentChatMetrics().measureFont).toMatch(/^14px "Folio Sans", "cmux-pack-\d+", -apple-system/);
+    expect(currentChatMetrics().measureFont).not.toBe(loadedFont);
     setChatDisplay({});
     expect(chatDisplayVariables(chatDisplay())["--font-ui"]).toBeNull();
   });
