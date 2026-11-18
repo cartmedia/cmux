@@ -617,3 +617,208 @@ fn ledger_scan_resume_pass_bench() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Waits past the clock tick of the last folder change, then trusts folders at once
+/// (`kind_heads.rs` `SETTLED`): a test's changes come milliseconds apart, a daemon's seconds.
+fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    kind_heads::SETTLED_FOR.with(|s| s.set(Some(std::time::Duration::ZERO)));
+}
+
+/// Detector for a resend that opens every segment of its chat (cmux NEXT nightly
+/// 1.0.0-nightly.4424316677601, 2026-11-18: three keyed scans a resend, each listing, opening and
+/// stat-ing all of a chat's segments, held Leo's daemon at 60-130% CPU while he typed). Once a
+/// chat's folders are settled, a keyed scan opens only its last segment, however many segments
+/// the log has, and still sees an append, a new segment, and a sealed segment replaced by a
+/// rename.
+#[test]
+fn a_keyed_scan_of_a_settled_log_opens_its_last_segment_only() {
+    let root = root();
+    let (store, mut log) = store_with_log(&root, 40);
+    let segments = store.segments("c").unwrap().len() as u64;
+    assert!(segments >= 100, "a log of many segments ({segments})");
+    settle();
+    let prompts = ["p2", "p25", "p288", "p900"];
+    for prompt in prompts {
+        assert_eq!(keyed(&store, prompt), naming(&log, prompt));
+    }
+    kind_heads::SEGMENT_OPENS.with(|n| n.set(0));
+    for _ in 0..20 {
+        for prompt in prompts {
+            assert_eq!(keyed(&store, prompt), naming(&log, prompt));
+        }
+    }
+    let opens = kind_heads::SEGMENT_OPENS.with(|n| n.get());
+    assert_eq!(opens, 80, "80 keyed scans of a {segments}-segment log opened {opens} segments");
+    // Appends, past a new segment or two: seen.
+    let mut seq = log.last().unwrap().seq;
+    for kind in ["queued", "user_message", "tool_call_update", "turn_result"] {
+        seq += 1;
+        let r = rec(seq, kind);
+        store.append("c", &r).unwrap();
+        log.push(r);
+    }
+    store.flush().unwrap();
+    settle();
+    for prompt in ["p2", "p961", "p962", "p964"] {
+        assert_eq!(keyed(&store, prompt), naming(&log, prompt), "{prompt} after the appends");
+    }
+    // A sealed segment replaced by a rename: its records are the new file's.
+    let (_, first) = store.segments("c").unwrap()[0].clone();
+    let text = std::fs::read_to_string(&first).unwrap();
+    let gone: Vec<String> = text
+        .lines()
+        .filter(|l| l.contains("\"kind\":\"queued\""))
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["msg"]["promptId"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert!(!gone.is_empty(), "the first segment holds a queued record");
+    let kept: String = text
+        .lines()
+        .filter(|l| !l.contains("\"kind\":\"queued\""))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let tmp = first.with_extension("rewrite");
+    std::fs::write(&tmp, kept).unwrap();
+    std::fs::rename(&tmp, &first).unwrap();
+    log.retain(|r| !(r.kind == "queued" && gone.iter().any(|g| r.msg["promptId"] == g.as_str())));
+    settle();
+    for prompt in &gone {
+        assert_eq!(keyed(&store, prompt), naming(&log, prompt), "{prompt} after the rewrite");
+    }
+    kind_heads::SETTLED_FOR.with(|s| s.set(None));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A folder changed within `SETTLED` is not trusted: every segment is checked, as before.
+#[test]
+fn a_keyed_scan_of_a_log_just_written_checks_every_segment() {
+    let root = root();
+    let (store, log) = store_with_log(&root, 8);
+    let segments = store.segments("c").unwrap().len() as u64;
+    for prompt in ["p2", "p25"] {
+        assert_eq!(keyed(&store, prompt), naming(&log, prompt));
+    }
+    kind_heads::SEGMENT_OPENS.with(|n| n.set(0));
+    assert_eq!(keyed(&store, "p2"), naming(&log, "p2"));
+    assert_eq!(kind_heads::SEGMENT_OPENS.with(|n| n.get()), segments);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A resend's log reads at Leo's scale, timed (one harness, before and after):
+/// `ACPMUX_RESEND_BENCH_CHATS=10000 cargo test --release -p acpmux --lib resend_scale_bench --
+/// --ignored --nocapture`. One coordinator chat of `ACPMUX_RESEND_BENCH_TURNS` turns (default
+/// 20,000: 480,000 records, about 41 segments of 8 MiB, as his `claude-sr2-coord` holds) beside
+/// `ACPMUX_RESEND_BENCH_CHATS` small chats, each asked once first (their heads held as the
+/// daemon holds them). A resend reads the coordinator's inbox records and its prompt state
+/// (`turns.rs`); the bench times that pair, and the CPU it takes a second at 100 resends a
+/// second.
+#[test]
+#[ignore = "a timing harness, run by hand"]
+fn resend_scale_bench() {
+    let root = root();
+    let store = LocalStore::new(root.clone(), 8 << 20).unwrap();
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let chats = env("ACPMUX_RESEND_BENCH_CHATS", 10_000);
+    let turns = env("ACPMUX_RESEND_BENCH_TURNS", 20_000);
+    let mut seq = 0;
+    let append = |id: &str, seq: &mut u64, turn: u64| {
+        for kind in ["queued", "user_message", "turn_started", "inbox", "inbox_noticed"]
+            .into_iter()
+            .chain(std::iter::repeat_n("tool_call_update", 18))
+            .chain(["turn_result"])
+        {
+            *seq += 1;
+            let pad = match kind {
+                "user_message" => 4096,
+                "tool_call_update" => 640,
+                _ => 256,
+            };
+            let mut msg = json!({"promptId": format!("p{turn}"), "turnId": format!("t{turn}"), "text": "x".repeat(pad)});
+            if kind == "inbox_noticed" {
+                msg = json!({"promptIds": [format!("m{turn}")], "turnId": format!("t{turn}")});
+            }
+            let dir = if kind == "tool_call_update" { "in" } else { "mux" };
+            let r = EventRecord {
+                seq: *seq,
+                at: *seq,
+                dir: dir.into(),
+                kind: kind.into(),
+                msg,
+                host_seq: None,
+            };
+            store.append(id, &r).unwrap();
+        }
+    };
+    for turn in 0..turns {
+        append("coord", &mut seq, turn);
+    }
+    for chat in 0..chats {
+        let mut s = 0;
+        append(&format!("c{chat}"), &mut s, 0);
+    }
+    store.flush().unwrap();
+    let segments = store.segments("coord").unwrap().len();
+    const INBOX: &[&str] = &["inbox", "inbox_noticed", "inbox_answered", "inbox_removed"];
+    let resend = |store: &LocalStore, prompt: &str| {
+        let mut seen = 0u64;
+        let mut count = |_: EventRecord| {
+            seen += 1;
+            true
+        };
+        store
+            .scan_kinds_keyed(
+                "coord",
+                INBOX,
+                &mut |h| h.unread || h.prompt_id == Some(prompt),
+                &mut count,
+            )
+            .unwrap();
+        store
+            .scan_kinds_keyed(
+                "coord",
+                PROMPT_KINDS,
+                &mut |h| h.prompt_id == Some(prompt),
+                &mut count,
+            )
+            .unwrap();
+        seen
+    };
+    // First asks: every chat's heads read once, as a running daemon has them.
+    resend(&store, "p0");
+    for chat in 0..chats {
+        let id = format!("c{chat}");
+        store
+            .scan_kinds_keyed(&id, PROMPT_KINDS, &mut |h| h.prompt_id == Some("p0"), &mut |_| true)
+            .unwrap();
+    }
+    // The folders settle as a daemon's do between segments.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    resend(&store, "p1");
+    let calls = 300u64;
+    let cpu = || {
+        // SAFETY: getrusage into a zeroed struct this function owns.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        let t = |v: libc::timeval| v.tv_sec as f64 * 1e3 + v.tv_usec as f64 / 1e3;
+        t(usage.ru_utime) + t(usage.ru_stime)
+    };
+    let (started, cpu0) = (std::time::Instant::now(), cpu());
+    let mut seen = 0;
+    for call in 0..calls {
+        seen += resend(&store, &format!("p{}", (call * 7919) % turns));
+    }
+    let (wall, cpu_ms) = (started.elapsed().as_secs_f64() * 1e3, cpu() - cpu0);
+    println!(
+        "RESEND_BENCH chats={chats} coord_turns={turns} coord_segments={segments} resends={calls} records={seen} \
+         wall_ms_per_resend={:.3} cpu_ms_per_resend={:.3} cpu_pct_at_100_resends_per_s={:.1}",
+        wall / calls as f64,
+        cpu_ms / calls as f64,
+        cpu_ms / calls as f64 * 100.0 / 10.0,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
