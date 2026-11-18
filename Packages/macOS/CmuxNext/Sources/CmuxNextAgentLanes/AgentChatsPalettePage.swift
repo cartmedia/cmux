@@ -1,7 +1,7 @@
 import CmuxAgentBrands
 public import CmuxNextAgentPane
 public import CmuxNextPalette
-import Foundation
+public import Foundation
 
 /// The command palette's chats page (`agentPane.searchChats`, decision K1): the local acpmux
 /// daemon's chats, newest first, each opening its chat as a session link does. acpmux searches its
