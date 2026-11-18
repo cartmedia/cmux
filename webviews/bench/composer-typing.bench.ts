@@ -41,6 +41,7 @@ import type { Page } from "playwright";
 import { parseArms, runArms, servePane } from "./composer-arms";
 import { reportTrace, traceWindow } from "./styleInvalidationTrace";
 import { sourceMapper } from "./sourceMapper";
+import { reportFrames, traceFrames } from "./keyFrameTrace";
 let mapUrl: (file: string, line: number, column: number) => string = (file, line) => `${file}:${line + 1}`;
 
 const argv = process.argv.slice(2);
@@ -64,6 +65,10 @@ const DEV = argv.includes("--dev");
 /// stream with no typing; it prints elements restyled per key and per token and what restyled them
 /// (styleInvalidationTrace.ts; `STYLE-TRACE ... SUMMARY` lines).
 const TRACE = argv.includes("--trace");
+/// With --frames: a Chromium trace over the typed keys read per key from keydown to paint: the key's own task, the
+/// work between it and its frame, the wait for the display tick, the frame callbacks ahead of the key's, that frame's
+/// rendering, and a breakdown of every main-thread task in the window (keyFrameTrace.ts; `KEY-FRAMES` lines).
+const FRAMES = argv.includes("--frames");
 const webviews = path.resolve(import.meta.dir, "..");
 const ARMS = parseArms(flag("--arms"), webviews);
 const ROUNDS = Number(flag("--rounds") ?? 6);
@@ -174,9 +179,9 @@ const releases: (() => unknown)[] = [];
 // first's).
 const serveOptions = {
   dev: DEV,
-  unminified: PROFILE || TRACE,
-  sourcemap: TRACE,
-  built: TRACE ? (out: string) => void (mapUrl = sourceMapper(out)) : undefined,
+  unminified: PROFILE || TRACE || FRAMES,
+  sourcemap: TRACE || FRAMES,
+  built: TRACE || FRAMES ? (out: string) => void (mapUrl = sourceMapper(out)) : undefined,
 };
 
 /// One length in one mode on the pane served at `port`: a fresh browser process and page, the keys typed, its row.
@@ -293,7 +298,12 @@ async function measure(port: number, length: number, mode: Mode, replyWords = 0)
     };
     await page.evaluate(() => (window as any).__frameWork.start());
     const typedAt = performance.now();
-    const typedEvents = TRACE ? await traceWindow(browser, page, typeKeys) : (await typeKeys(), undefined);
+    let frameEvents: Awaited<ReturnType<typeof traceFrames>> | undefined;
+    const typedEvents = TRACE
+      ? await traceWindow(browser, page, typeKeys)
+      : FRAMES
+        ? ((frameEvents = await traceFrames(browser, page, typeKeys)), undefined)
+        : (await typeKeys(), undefined);
     const typedMs = performance.now() - typedAt;
     const frameWork = (await page.evaluate(() => (window as any).__frameWork.stop())) as number[];
     await page.waitForTimeout(500);
@@ -320,6 +330,7 @@ async function measure(port: number, length: number, mode: Mode, replyWords = 0)
         `STYLE-TRACE ${mode}-typing ${rows}rows WINDOW ${JSON.stringify({ keys: KEYS, window_ms: Math.round(typedMs) })}`,
       );
     }
+    if (frameEvents) reportFrames(`${mode}-typing ${rows}rows`, frameEvents, mapUrl);
     if (TRACE && mode === "stream") {
       let run: Record<string, any> = {};
       const events = await traceWindow(browser, page, async () => {

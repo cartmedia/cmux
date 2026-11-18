@@ -1,0 +1,1960 @@
+diff --git a/webviews/bench/composer-typing.bench.ts b/webviews/bench/composer-typing.bench.ts
+index 0cf5dceb390..3ae654310bb 100644
+--- a/webviews/bench/composer-typing.bench.ts
++++ b/webviews/bench/composer-typing.bench.ts
+@@ -12,6 +12,7 @@
+ //   layout    the page's layouts and style recalcs (CDP Performance.getMetrics LayoutCount, RecalcStyleCount)
+ //   script    main-thread script, layout and style time (ScriptDuration, LayoutDuration, RecalcStyleDuration), ms
+ //   to_frame  the page's own typingStats (keydown to the next frame, p50 / p95 / max), as the Mac bench reads it
++//   to_paint  keydown to after that frame paints (p50 / p95): input to paint
+ //   long_tasks  main-thread tasks of 50 ms or more while the keys are typed (PerformanceObserver longtask), and
+ //             longest_task_ms the longest (0 when none)
+ //   stream    with --modes idle,stream: the same keys while the chat streams a reply (60 deltas/s, a tool call every
+@@ -23,10 +24,14 @@
+ //             anything a keypress causes. One render per event is a coalesced draw; more is a frame it will redraw.
+ //             STREAM-SPANS lines carry that run's spans (perf.ts `span`), which name the work each streamed frame
+ //             spends its time in (flush.scroll, flush.drawn, vt.body, row.renders) where a render count cannot.
++//   reply     with --modes reply: the same keys while one long reply streams, for each --reply-words length (default
++//             2000,20000 words): its first words arrive at once and reveal, then the stream appends to it with no tool
++//             call. frame_p50 / frame_p95 (every mode) are each display frame's work while the keys are typed, rAF to
++//             after the page rendered it: in reply mode, what one reveal frame costs against the reply's length.
+ // Every length and mode is a fresh browser process and page. With `--arms A=DIR,B=DIR` it measures two webviews
+ // trees in one run, interleaved A B B A for `--rounds` rounds (default 6) with a base-against-base noise floor, and
+ // prints each arm's median and spread (composer-arms.ts).
+-//   bun bench/composer-typing.bench.ts [--lengths 60,1500,6000] [--keys 60] [--gap 80] [--modes idle,stream] [--dev] [--profile]
++//   bun bench/composer-typing.bench.ts [--lengths 60,1500,6000] [--keys 60] [--gap 80] [--modes idle,stream,reply] [--reply-words 2000,20000] [--dev] [--profile]
+ //     [--arms A=.,B=../webviews-b] [--rounds 6] [--no-floor]
+ /// <reference types="bun" />
+ import path from "node:path";
+@@ -36,6 +41,7 @@ import type { Page } from "playwright";
+ import { parseArms, runArms, servePane } from "./composer-arms";
+ import { reportTrace, traceWindow } from "./styleInvalidationTrace";
+ import { sourceMapper } from "./sourceMapper";
++import { reportFrames, traceFrames } from "./keyFrameTrace";
+ let mapUrl: (file: string, line: number, column: number) => string = (file, line) => `${file}:${line + 1}`;
+ 
+ const argv = process.argv.slice(2);
+@@ -46,7 +52,12 @@ const flag = (name: string) => {
+ const LENGTHS = (flag("--lengths") ?? "60,1500,6000").split(",").map(Number);
+ const KEYS = Number(flag("--keys") ?? 60);
+ const GAP_MS = Number(flag("--gap") ?? 80);
+-const MODES = (flag("--modes") ?? "idle").split(",") as ("idle" | "stream")[];
++type Mode = "idle" | "stream" | "reply";
++const MODES = (flag("--modes") ?? "idle").split(",") as Mode[];
++/// With --modes reply: the reply lengths, in words, that one streaming reply has on screen while the keys are typed.
++const REPLY_WORDS = (flag("--reply-words") ?? "2000,20000").split(",").map(Number);
++/// How long the long reply's first words get to reveal before the timed stream and the keys start.
++const REPLY_SETTLE_MS = 1500;
+ /// With --profile: a CPU profile over the typed keys, and the functions with the most time per key (inclusive and self).
+ const PROFILE = argv.includes("--profile");
+ const DEV = argv.includes("--dev");
+@@ -54,15 +65,23 @@ const DEV = argv.includes("--dev");
+ /// stream with no typing; it prints elements restyled per key and per token and what restyled them
+ /// (styleInvalidationTrace.ts; `STYLE-TRACE ... SUMMARY` lines).
+ const TRACE = argv.includes("--trace");
++/// With --frames: a Chromium trace over the typed keys read per key from keydown to paint: the key's own task, the
++/// work between it and its frame, the wait for the display tick, the frame callbacks ahead of the key's, that frame's
++/// rendering, and a breakdown of every main-thread task in the window (keyFrameTrace.ts; `KEY-FRAMES` lines).
++const FRAMES = argv.includes("--frames");
+ const webviews = path.resolve(import.meta.dir, "..");
+ const ARMS = parseArms(flag("--arms"), webviews);
+ const ROUNDS = Number(flag("--rounds") ?? 6);
+ const FLOOR = !argv.includes("--no-floor");
+ /// What an A/B of arms summarizes: key to frame, key to listener and the long tasks.
+ const ARM_METRICS = [
++  "frame_p50",
++  "frame_p95",
+   "to_frame_p50",
+   "to_frame_p95",
+   "to_frame_max",
++  "to_paint_p50",
++  "to_paint_p95",
+   "to_listener_p95",
+   "longest_task_ms",
+   "long_tasks",
+@@ -160,17 +179,55 @@ const releases: (() => unknown)[] = [];
+ // first's).
+ const serveOptions = {
+   dev: DEV,
+-  unminified: PROFILE || TRACE,
+-  sourcemap: TRACE,
+-  built: TRACE ? (out: string) => void (mapUrl = sourceMapper(out)) : undefined,
++  unminified: PROFILE || TRACE || FRAMES,
++  sourcemap: TRACE || FRAMES,
++  built: TRACE || FRAMES ? (out: string) => void (mapUrl = sourceMapper(out)) : undefined,
+ };
+ 
+ /// One length in one mode on the pane served at `port`: a fresh browser process and page, the keys typed, its row.
+-async function measure(port: number, length: number, mode: "idle" | "stream"): Promise<Record<string, unknown>> {
++/// Init script (self-contained): the work of every display frame from `__frameWork.start()` to `stop()`, rAF time to
++/// after the page rendered it (a posted message runs after the rendering update), as loadDebug.ts `loadRun` reads it.
++function frameWorkProbe() {
++  const w = window as unknown as { __frameWork?: { start(): void; stop(): number[] } };
++  if (w.__frameWork) return;
++  let on = false;
++  let work: number[] = [];
++  const tick = (now: number) => {
++    if (!on) return;
++    const channel = new MessageChannel();
++    channel.port1.onmessage = () => {
++      channel.port1.close();
++      work.push(performance.now() - now);
++    };
++    channel.port2.postMessage(0);
++    requestAnimationFrame(tick);
++  };
++  w.__frameWork = {
++    start() {
++      work = [];
++      on = true;
++      requestAnimationFrame(tick);
++    },
++    stop() {
++      on = false;
++      return work;
++    },
++  };
++}
++
++const pct = (values: number[], at: number) => {
++  const sorted = [...values].sort((a, b) => a - b);
++  return sorted.length
++    ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * at))]! * 100) / 100
++    : 0;
++};
++
++async function measure(port: number, length: number, mode: Mode, replyWords = 0): Promise<Record<string, unknown>> {
+   const browser = await chromium.launch({ headless: true });
+   try {
+     const page = await browser.newPage({ viewport: { width: 1100, height: 820 } });
+     await page.addInitScript(longTaskProbe);
++    await page.addInitScript(frameWorkProbe);
+     const rows = await openChat(page, port, Math.max(1, Math.round(length / 3)));
+     const cdp = await page.context().newCDPSession(page);
+     await cdp.send("Performance.enable");
+@@ -199,6 +256,8 @@ async function measure(port: number, length: number, mode: "idle" | "stream"): P
+       await cdp.send("Profiler.start");
+     }
+     // Stream mode: a reply streams in for the whole typing run (no scrolling), a tool call every 30 deltas.
++    // Reply mode: one reply of `replyWords` words is on screen, and the same stream appends to it with no tool call
++    // (a tool call would end the reply's row and start a short one), so each frame's cost reads against its length.
+     const streaming =
+       mode === "stream"
+         ? page.evaluate(
+@@ -206,9 +265,22 @@ async function measure(port: number, length: number, mode: "idle" | "stream"): P
+               (window as any).cmuxAcpmuxDebug.loadRun({ seconds, chunk_ms: 16, tool_every: 30, scroll_speed: 0 }),
+             (KEYS * (GAP_MS + 20)) / 1000 + 1,
+           )
+-        : Promise.resolve(undefined);
+-    if (mode === "stream") {
+-      await page.waitForTimeout(300);
++        : mode === "reply"
++          ? page.evaluate(
++              ([seconds, words, settle]) =>
++                (window as any).cmuxAcpmuxDebug.loadRun({
++                  seconds,
++                  chunk_ms: 16,
++                  tool_every: 0,
++                  scroll_speed: 0,
++                  reply_words: words,
++                  reply_settle_ms: settle,
++                }),
++              [(KEYS * (GAP_MS + 20)) / 1000 + 1, replyWords, REPLY_SETTLE_MS] as const,
++            )
++          : Promise.resolve(undefined);
++    if (mode !== "idle") {
++      await page.waitForTimeout(mode === "reply" ? REPLY_SETTLE_MS + 300 : 300);
+       await page.evaluate(() => {
+         const debug = (window as any).cmuxAcpmuxDebug;
+         debug.resetTyping();
+@@ -224,9 +296,16 @@ async function measure(port: number, length: number, mode: "idle" | "stream"): P
+         await page.waitForTimeout(GAP_MS);
+       }
+     };
++    await page.evaluate(() => (window as any).__frameWork.start());
+     const typedAt = performance.now();
+-    const typedEvents = TRACE ? await traceWindow(browser, page, typeKeys) : (await typeKeys(), undefined);
++    let frameEvents: Awaited<ReturnType<typeof traceFrames>> | undefined;
++    const typedEvents = TRACE
++      ? await traceWindow(browser, page, typeKeys)
++      : FRAMES
++        ? ((frameEvents = await traceFrames(browser, page, typeKeys)), undefined)
++        : (await typeKeys(), undefined);
+     const typedMs = performance.now() - typedAt;
++    const frameWork = (await page.evaluate(() => (window as any).__frameWork.stop())) as number[];
+     await page.waitForTimeout(500);
+     const after = await metrics();
+     const until = await page.evaluate(() => performance.now());
+@@ -251,6 +330,7 @@ async function measure(port: number, length: number, mode: "idle" | "stream"): P
+         `STYLE-TRACE ${mode}-typing ${rows}rows WINDOW ${JSON.stringify({ keys: KEYS, window_ms: Math.round(typedMs) })}`,
+       );
+     }
++    if (frameEvents) reportFrames(`${mode}-typing ${rows}rows`, frameEvents, mapUrl);
+     if (TRACE && mode === "stream") {
+       let run: Record<string, any> = {};
+       const events = await traceWindow(browser, page, async () => {
+@@ -311,6 +391,9 @@ async function measure(port: number, length: number, mode: "idle" | "stream"): P
+     return {
+       mode,
+       rows,
++      ...(mode === "reply" ? { reply_words: replyWords } : {}),
++      frame_p50: pct(frameWork, 0.5),
++      frame_p95: pct(frameWork, 0.95),
+       keys: typing.keys,
+       pane: per(renders.pane ?? 0),
+       transcript: per(renders.transcript ?? 0),
+@@ -327,7 +410,12 @@ async function measure(port: number, length: number, mode: "idle" | "stream"): P
+       to_work_p95: typing.to_work?.p95_ms,
+       to_frame_p50: typing.to_frame?.p50_ms,
+       to_frame_p95: typing.to_frame?.p95_ms,
++      to_tick_p50: typing.to_tick?.p50_ms,
++      to_tick_p95: typing.to_tick?.p95_ms,
++      ahead_p95: typing.tick_to_callback?.p95_ms,
+       to_frame_max: typing.to_frame?.max_ms,
++      to_paint_p50: typing.to_paint?.p50_ms,
++      to_paint_p95: typing.to_paint?.p95_ms,
+       longest_task_ms: Math.round(Math.max(0, ...long.map((task) => task.ms)) * 10) / 10,
+       long_tasks: long.length,
+       composer_per_stream_event: composerPerEvent,
+@@ -347,29 +435,33 @@ async function measure(port: number, length: number, mode: "idle" | "stream"): P
+ }
+ 
+ try {
+-  const cases = LENGTHS.flatMap((length) => MODES.map((mode) => ({ length, mode })));
++  const cases = LENGTHS.flatMap((length) =>
++    MODES.flatMap((mode) =>
++      mode === "reply" ? REPLY_WORDS.map((words) => ({ length, mode, words })) : [{ length, mode, words: 0 }],
++    ),
++  );
+   if (ARMS) {
+     // Two source trees in one run: each built and served once, then every case interleaved (composer-arms.ts).
+     const ports = new Map<string, number>();
+     for (const arm of ARMS) ports.set(arm.name, await servePane(arm.dir, serveOptions, releases));
+     const runs: Record<string, unknown>[] = [];
+-    for (const { length, mode } of cases)
++    for (const { length, mode, words } of cases)
+       runs.push(
+         ...(await runArms({
+           arms: ARMS,
+           rounds: ROUNDS,
+           floor: FLOOR,
+-          label: `${mode} ${length} rows`,
++          label: `${mode} ${length} rows${words ? ` ${words} words` : ""}`,
+           metrics: ARM_METRICS,
+           ports,
+-          run: (port) => measure(port, length, mode),
++          run: (port) => measure(port, length, mode, words),
+         })),
+       );
+     console.log(`COMPOSER-TYPING ${JSON.stringify(runs)}`);
+   } else {
+     const port = await servePane(webviews, serveOptions, releases);
+     const table: Record<string, unknown>[] = [];
+-    for (const { length, mode } of cases) table.push(await measure(port, length, mode));
++    for (const { length, mode, words } of cases) table.push(await measure(port, length, mode, words));
+     console.table(table.map(({ busiest: _, nativePosts: __, ...row }) => row));
+     for (const row of table)
+       console.log(
+diff --git a/webviews/src/agent-session/acpmux/Composer.tsx b/webviews/src/agent-session/acpmux/Composer.tsx
+index 2498f131d27..feb069e5a3d 100644
+--- a/webviews/src/agent-session/acpmux/Composer.tsx
++++ b/webviews/src/agent-session/acpmux/Composer.tsx
+@@ -2734,6 +2734,9 @@ function ComposerFrame({
+   );
+   // Why a failed turn paused the queue: the paused note names it (queuePause.ts).
+   const pauseReason = snapshot.summary?.queuePaused === true ? queuePauseReason(snapshot.rows) : undefined;
++  // The queue does not read the prompt: with one handler that keeps its identity, a key leaves it be
++  // (`MemoComposerQueue`). It drew once a key.
++  const leaveQueue = useCallback(() => field.current?.focus(), []);
+   return (
+     <form
+       ref={form}
+@@ -2791,7 +2794,7 @@ function ComposerFrame({
+           form.current.parentElement,
+         )}
+       {/* The bottom stack's queue slot (bottomStack.css): above the strip, in the layout flow. */}
+-      <ComposerQueue
++      <MemoComposerQueue
+         // One per chat: a chat's long queue keeps its fold, open or closed, as you switch chats.
+         key={snapshot.summary?.sessionId || sessionId}
+         chat={snapshot.summary?.sessionId || sessionId}
+@@ -2806,7 +2809,7 @@ function ComposerFrame({
+         onSideChat={onQueueSideChat}
+         readImage={queueImage}
+         commands={commands}
+-        onLeave={() => field.current?.focus()}
++        onLeave={leaveQueue}
+       />
+       {context}
+       {dropHost && (
+@@ -3089,6 +3092,7 @@ function ComposerFrame({
+ }
+ 
+ const MemoComposer = React.memo(ComposerFrame);
++const MemoComposerQueue = React.memo(ComposerQueue);
+ 
+ /// One attachment above the prompt. An image draws a thumbnail in its own shape and opens in the chat's image
+ /// viewer on a click; one the pane cannot draw falls back to its name, never an empty square.
+diff --git a/webviews/src/agent-session/acpmux/conversation/Markdown.tsx b/webviews/src/agent-session/acpmux/conversation/Markdown.tsx
+index 81acb51af45..47affe83efb 100644
+--- a/webviews/src/agent-session/acpmux/conversation/Markdown.tsx
++++ b/webviews/src/agent-session/acpmux/conversation/Markdown.tsx
+@@ -36,6 +36,7 @@ import { useStartedMentions } from "../started/startedSessionCardModel";
+ import { entranceAllowed } from "../../shared/pageReveal";
+ 
+ import { type MdBlock, parseMarkdown, footnoteOrder, MAX_REPLY_DATA_URLS, dataUrlsOverBudget } from "./markdownModel";
++import { ReplyScan } from "./replyScan";
+ import { type InlineOptions, renderInline, InlineImage } from "./inlineMarkdown";
+ 
+ /// A long list number (`1000.`) widens its items' indent so it never draws over their text; a
+@@ -466,21 +467,37 @@ export function Markdown({
+         : undefined,
+     [commonmark, children, messageAt],
+   );
+-  const blocks =
+-    whole ?? acpmuxPerf.timed("markdown.parse", () => parser.current!.update(children, { streaming, messageAt }));
++  if (!whole) acpmuxPerf.timed("markdown.parse", () => parser.current!.advance(children, { streaming, messageAt }));
++  // A growing reply's closed blocks never change again (incrementalMarkdown.ts): the same array until
++  // another block closes, so what is drawn from them is kept with it (`closedDrawn` below).
++  const closedBlocks = whole ? NO_BLOCKS : parser.current.closedBlocks;
++  const tailBlocks = whole ?? parser.current.tailBlocks;
++  const blocks = closedBlocks.length ? [...closedBlocks, ...tailBlocks] : tailBlocks;
+   // Blocks there at the first render (history, a row scrolled into view) never animate.
+   const atMount = useRef<Set<string> | null>(null);
+   atMount.current ??= new Set(blocks.map((entry) => entry.key));
+   // Blocks first drawn while entrances wait (the page hidden or just shown again).
+   const awayBlocks = useRef(new Set<string>());
++  // The reveal draws a streaming reply again on every display frame, its source a few words longer
++  // each time. Its closed text is read once, as it closes, and only the text after it each frame
++  // (replyScan.ts), so a frame costs the same at 200 words and at 20,000.
++  const scan = useRef<ReplyScan | null>(null);
++  scan.current ??= new ReplyScan();
++  const closedEnd = whole ? -1 : parser.current.closedState.end;
++  const generation = whole ? -1 : parser.current.closedState.generation;
++  const scanned = useMemo(
++    () =>
++      closedEnd < 0
++        ? { noteIds: footnoteOrder(children).join(" "), folderKey: replyFolders(children).join("\n") }
++        : scan.current!.read(children, { end: closedEnd, generation }),
++    [children, closedEnd, generation],
++  );
+   // Notes are numbered by first reference; the key keeps `opts` (and every memoized block) the
+   // same object until a new reference arrives.
+-  // The reveal clock can re-render a streaming reply while its source is unchanged. Keep the
+-  // full footnote scan on source changes instead of repeating it for each animation frame.
+-  const noteIds = useMemo(() => footnoteOrder(children).join(" "), [children]);
++  const noteIds = scanned.noteIds;
+   // The folders this reply's paths are in, joined so a streaming reply keeps the same value (and
+   // its memoized blocks) until a new folder arrives; its bare file names may be files there.
+-  const folderKey = useMemo(() => replyFolders(children).join("\n"), [children]);
++  const folderKey = scanned.folderKey;
+   const folders = useMemo(() => (folderKey ? folderKey.split("\n") : []), [folderKey]);
+   // The reply's data URL budget; only a reply longer than the budget can pass it.
+   const budgetSource = children.length > MAX_REPLY_DATA_URLS ? children : "";
+@@ -530,43 +547,74 @@ export function Markdown({
+   // came while the user was away: it never enters (WebKit would play its suspended entrance on
+   // return, shared/pageReveal.ts). It still hands its code over like any live block.
+   const away = streaming && !entranceAllowed();
+-  const draw = (entry: KeyedBlock, index: number) => {
+-    if (!artifactRevisions.current.has(entry.block)) artifactRevisions.current.set(entry.block, artifactRevision);
+-    const live = !atMount.current!.has(entry.key);
+-    if (live && away) awayBlocks.current.add(entry.key);
+-    // The last block is a fence still arriving. Read from the parsed (safe) tail, not the raw
+-    // fence count: a closer still being typed is held back (safeTail.ts), so the card stays open
+-    // until the closed one draws the same lines, and an opener held back after a closed fence does
+-    // not turn that fence back into an open one.
+-    const open = streaming && index === blocks.length - 1 && entry.block.type === "code" && entry.block.open === true;
+-    if (open) streamedFences.current.add(entry.key);
+-    return (
+-      <BlockView
+-        key={entry.key}
+-        block={entry.block}
+-        opts={opts}
+-        depth={0}
+-        enter={streaming && live && !awayBlocks.current.has(entry.key)}
+-        code={open ? "open" : plainCode ? "plain" : live || streamedFences.current.has(entry.key) ? "handoff" : "final"}
+-        tail={index === blocks.length - 1 ? freshTail : undefined}
+-        trailing={index === trailingIndex ? trailing : undefined}
+-        artifactIdentity={artifactIdentity ? `${artifactIdentity}\u0000${entry.key}` : undefined}
+-        artifactRevision={artifactRevisions.current.get(entry.block)}
+-      />
+-    );
+-  };
++  // Every block but the last that is closed: drawn again only when another block closes or what
++  // they all read changes (their options, the stream's end, the page going away), never on a reveal
++  // frame, which then reconciles them as the same elements. The last block is the one a frame
++  // grows, and the one the trailing actions and the fresh fade go on.
++  const kept = Math.max(0, Math.min(closedBlocks.length, blocks.length - 1));
++  const closedDrawn = useMemo(() => {
++    const context: DrawContext = {
++      opts,
++      streaming,
++      away,
++      plainCode,
++      artifactIdentity,
++      artifactRevision,
++      atMount: atMount.current!,
++      awayBlocks: awayBlocks.current,
++      streamedFences: streamedFences.current,
++      artifactRevisions: artifactRevisions.current,
++    };
++    const drawn: ReactNode[] = [];
++    const notes: { entry: KeyedBlock; index: number }[] = [];
++    for (let index = 0; index < kept; index += 1) {
++      const entry = closedBlocks[index]!;
++      if (entry.block.type === "footnote") {
++        drawn.push(null);
++        notes.push({ entry, index });
++      } else drawn.push(drawBlock(entry, context, NOT_LAST));
++    }
++    return { drawn, notes };
++  }, [closedBlocks, kept, opts, streaming, away, plainCode, artifactIdentity, artifactRevision]);
+   // Footnote definitions draw as the reply's notes, under a rule, in reference order (an
+   // unreferenced note last).
+-  const notes = blocks
+-    .map((entry, index) => ({ entry, index }))
+-    .filter(({ entry }) => entry.block.type === "footnote")
+-    .sort((a, b) => noteRank(a.entry.block, opts) - noteRank(b.entry.block, opts));
++  const notes = [...closedDrawn.notes];
++  for (let index = kept; index < blocks.length; index += 1)
++    if (blocks[index]!.block.type === "footnote") notes.push({ entry: blocks[index]!, index });
++  notes.sort((a, b) => noteRank(a.entry.block, opts) - noteRank(b.entry.block, opts));
+   // Notes are displayed in reference order, which may differ from their source order.
+   const trailingIndex = notes.at(-1)?.index ?? blocks.length - 1;
++  const context: DrawContext = {
++    opts,
++    streaming,
++    away,
++    plainCode,
++    artifactIdentity,
++    artifactRevision,
++    atMount: atMount.current,
++    awayBlocks: awayBlocks.current,
++    streamedFences: streamedFences.current,
++    artifactRevisions: artifactRevisions.current,
++  };
++  const draw = (entry: KeyedBlock, index: number) =>
++    drawBlock(entry, context, {
++      // The last block is a fence still arriving. Read from the parsed (safe) tail, not the raw
++      // fence count: a closer still being typed is held back (safeTail.ts), so the card stays open
++      // until the closed one draws the same lines, and an opener held back after a closed fence does
++      // not turn that fence back into an open one.
++      open: streaming && index === blocks.length - 1 && entry.block.type === "code" && entry.block.open === true,
++      tail: index === blocks.length - 1 ? freshTail : undefined,
++      trailing: index === trailingIndex ? trailing : undefined,
++    });
++  const drawn = [...closedDrawn.drawn];
++  for (let index = kept; index < blocks.length; index += 1) {
++    const entry = blocks[index]!;
++    drawn.push(entry.block.type === "footnote" ? null : draw(entry, index));
++  }
+   return (
+     <ReplyFoldersContext.Provider value={folders}>
+       <div className={`cv-md selectable ${className}`}>
+-        {blocks.map((entry, index) => (entry.block.type === "footnote" ? null : draw(entry, index)))}
++        {drawn}
+         {notes.length > 0 && (
+           <section className="cv-footnotes" role="doc-endnotes">
+             <ol>{notes.map(({ entry, index }) => draw(entry, index))}</ol>
+@@ -576,3 +624,48 @@ export function Markdown({
+     </ReplyFoldersContext.Provider>
+   );
+ }
++
++const NO_BLOCKS: readonly KeyedBlock[] = [];
++
++/// What drawing a top-level block reads besides the block: the reply's options and state, and the
++/// sets Markdown keeps across renders.
++type DrawContext = {
++  opts: InlineOptions;
++  streaming: boolean;
++  away: boolean;
++  plainCode: boolean;
++  artifactIdentity?: string;
++  artifactRevision?: number;
++  atMount: Set<string>;
++  awayBlocks: Set<string>;
++  streamedFences: Set<string>;
++  artifactRevisions: WeakMap<MdBlock, number | undefined>;
++};
++
++/// What only the last block (or the note the trailing actions follow) draws.
++type LastPart = { open: boolean; tail?: FreshTail; trailing?: ReactNode };
++const NOT_LAST: LastPart = { open: false };
++
++function drawBlock(entry: KeyedBlock, context: DrawContext, last: LastPart): ReactNode {
++  const { artifactRevisions, atMount, awayBlocks, streamedFences } = context;
++  if (!artifactRevisions.has(entry.block)) artifactRevisions.set(entry.block, context.artifactRevision);
++  const live = !atMount.has(entry.key);
++  if (live && context.away) awayBlocks.add(entry.key);
++  if (last.open) streamedFences.add(entry.key);
++  return (
++    <BlockView
++      key={entry.key}
++      block={entry.block}
++      opts={context.opts}
++      depth={0}
++      enter={context.streaming && live && !awayBlocks.has(entry.key)}
++      code={
++        last.open ? "open" : context.plainCode ? "plain" : live || streamedFences.has(entry.key) ? "handoff" : "final"
++      }
++      tail={last.tail}
++      trailing={last.trailing}
++      artifactIdentity={context.artifactIdentity ? `${context.artifactIdentity}\u0000${entry.key}` : undefined}
++      artifactRevision={artifactRevisions.get(entry.block)}
++    />
++  );
++}
+diff --git a/webviews/src/agent-session/acpmux/conversation/incrementalMarkdown.ts b/webviews/src/agent-session/acpmux/conversation/incrementalMarkdown.ts
+index 46a00c1817b..7d41003c99e 100644
+--- a/webviews/src/agent-session/acpmux/conversation/incrementalMarkdown.ts
++++ b/webviews/src/agent-session/acpmux/conversation/incrementalMarkdown.ts
+@@ -12,7 +12,7 @@ export type KeyedBlock = { key: string; block: MdBlock };
+ /// its whole text again on the frame that shows it. Least recently used out past the caps (entries,
+ /// and characters of text held, so a few huge replies cannot pin megabytes).
+ type WholeParse = {
+-  closed: KeyedBlock[];
++  closed: readonly KeyedBlock[];
+   closedEnd: number;
+   tail: KeyedBlock[];
+   closedFences: number;
+@@ -43,9 +43,14 @@ export class IncrementalMarkdown {
+   private source = "";
+   private streaming = false;
+   private messageAt?: number;
+-  private closed: KeyedBlock[] = [];
++  /// Replaced, never changed in place, when blocks close: the same array until the next one does,
++  /// so a caller can keep what it drew from it (Markdown's closed blocks).
++  private closed: readonly KeyedBlock[] = [];
+   private closedEnd = 0;
+   private tail: KeyedBlock[] = [];
++  /// Counts the times the closed blocks were dropped or replaced by another text's: within one
++  /// generation the closed text only grows, so a scan of it (replyScan.ts) only adds to what it read.
++  private generation = 0;
+   /// The fence lines before `closedEnd`, counted as `fenceLines` counts them. It can be odd: a
+   /// fence line inside a `$$` display counts here but does not open a fence for the boundary.
+   private closedFences = 0;
+@@ -56,10 +61,30 @@ export class IncrementalMarkdown {
+ 
+   /// `streaming`: the tail draws only what is safe to draw half-written (safeTail.ts).
+   update(source: string, options: { streaming?: boolean; messageAt?: number } = {}): KeyedBlock[] {
++    this.advance(source, options);
++    return [...this.closed, ...this.tail];
++  }
++
++  /// The blocks before the last boundary, which never change again in this generation.
++  get closedBlocks(): readonly KeyedBlock[] {
++    return this.closed;
++  }
++
++  /// The blocks after it, parsed again on every update.
++  get tailBlocks(): readonly KeyedBlock[] {
++    return this.tail;
++  }
++
++  /// Where the closed blocks' text ends in the source, and the generation they belong to.
++  get closedState(): { end: number; generation: number } {
++    return { end: this.closedEnd, generation: this.generation };
++  }
++
++  /// `update` without joining the blocks into one list (Markdown reads them closed and tail apart).
++  advance(source: string, options: { streaming?: boolean; messageAt?: number } = {}): void {
+     const streaming = options.streaming ?? false;
+     const messageAt = options.messageAt;
+-    if (source === this.source && streaming === this.streaming && messageAt === this.messageAt)
+-      return [...this.closed, ...this.tail];
++    if (source === this.source && streaming === this.streaming && messageAt === this.messageAt) return;
+     // A parser that has drawn nothing yet, given a finished text it parsed before: the same blocks.
+     const fresh = this.source === "" && this.closedEnd === 0 && !streaming && source !== "";
+     if (fresh) {
+@@ -72,12 +97,13 @@ export class IncrementalMarkdown {
+         this.messageAt = messageAt;
+         this.source = source;
+         this.lastParsedLength = 0;
+-        this.closed = [...known.closed];
++        this.generation += 1;
++        this.closed = known.closed;
+         this.closedEnd = known.closedEnd;
+         this.tail = known.tail;
+         this.closedFences = known.closedFences;
+         this.fenceOpen = known.fenceOpen;
+-        return [...this.closed, ...this.tail];
++        return;
+       }
+     }
+     this.streaming = streaming;
+@@ -88,7 +114,7 @@ export class IncrementalMarkdown {
+     const boundary = lastBlockBoundary(source, this.closedEnd);
+     if (boundary > this.closedEnd) {
+       const closing = source.slice(this.closedEnd, boundary);
+-      this.closed.push(...this.parse(closing, this.closed.length));
++      this.closed = [...this.closed, ...this.parse(closing, this.closed.length)];
+       this.closedFences += fenceLines(closing);
+       this.closedEnd = boundary;
+     }
+@@ -101,7 +127,7 @@ export class IncrementalMarkdown {
+     if (fresh) {
+       const key = wholeKey(source, messageAt);
+       wholeParses.set(key, {
+-        closed: [...this.closed],
++        closed: this.closed,
+         closedEnd: this.closedEnd,
+         tail: this.tail,
+         closedFences: this.closedFences,
+@@ -114,10 +140,10 @@ export class IncrementalMarkdown {
+         wholeChars -= oldest.length;
+       }
+     }
+-    return [...this.closed, ...this.tail];
+   }
+ 
+   private reset(): void {
++    this.generation += 1;
+     this.source = "";
+     this.messageAt = undefined;
+     this.closed = [];
+diff --git a/webviews/src/agent-session/acpmux/conversation/markdownModel.tsx b/webviews/src/agent-session/acpmux/conversation/markdownModel.tsx
+index 19ab0c78ee2..220ba5f4ab4 100644
+--- a/webviews/src/agent-session/acpmux/conversation/markdownModel.tsx
++++ b/webviews/src/agent-session/acpmux/conversation/markdownModel.tsx
+@@ -327,8 +327,14 @@ export function footnoteOrder(source: string): string[] {
+   // A reference needs "[" and "^"; the scan below only deletes text, so without both there is none.
+   // A streaming reply runs this on every reveal frame, and most replies have no footnote.
+   if (!source.includes("^") || !source.includes("[")) return [];
+-  const prose = source.replace(/^\s*```[\s\S]*?(?:^\s*```|(?![\s\S]))/gm, "").replace(/(`+)[^`]*?\1/g, "");
+-  const ids: string[] = [];
++  return noteIds(source.replace(FENCED, "").replace(CODE_SPANS, ""), []);
++}
++
++const FENCED = /^\s*```[\s\S]*?(?:^\s*```|(?![\s\S]))/gm;
++const CODE_SPANS = /(`+)[^`]*?\1/g;
++const FENCE_LINE = /^\s*```/gm;
++
++function noteIds(prose: string, ids: string[]): string[] {
+   for (const match of prose.matchAll(/\[\^([\w-]+)\](?!:)/g)) {
+     const id = match[1]!;
+     if (!/^\w-\w$/.test(id) && !ids.includes(id)) ids.push(id);
+@@ -336,6 +342,20 @@ export function footnoteOrder(source: string): string[] {
+   return ids;
+ }
+ 
++/// `footnoteOrder` of a piece of a reply that ends at a line start, and whether the piece is sealed:
++/// every fence and code span it opens closes inside it, so `footnoteOrder(piece + rest)` is its ids
++/// followed by those of `rest` (replyScan.ts reads a streaming reply's closed blocks once this way).
++/// A piece that is not sealed reads again with the text after it.
++export function footnotePiece(piece: string): { ids: string[]; sealed: boolean } {
++  if (!piece.includes("`")) return { ids: footnoteOrder(piece), sealed: true };
++  // An even count of fence lines pairs each opener with a closer inside the piece; then only a
++  // backtick left over after the code spans could pair with one after it.
++  if ((piece.match(FENCE_LINE)?.length ?? 0) % 2 === 1) return { ids: [], sealed: false };
++  const prose = piece.replace(FENCED, "").replace(CODE_SPANS, "");
++  if (prose.includes("`")) return { ids: [], sealed: false };
++  return { ids: piece.includes("^") && piece.includes("[") ? noteIds(prose, []) : [], sealed: true };
++}
++
+ /// An image's source the pane can show: a data URL of a raster or SVG image. The pane's CSP
+ /// loads no other image, so a web image draws as a link to it.
+ export const INLINE_IMAGE = /^data:image\/(?:png|jpe?g|gif|webp|svg\+xml);/i;
+diff --git a/webviews/src/agent-session/acpmux/conversation/replyScan.test.ts b/webviews/src/agent-session/acpmux/conversation/replyScan.test.ts
+new file mode 100644
+index 00000000000..856f4c894cb
+--- /dev/null
++++ b/webviews/src/agent-session/acpmux/conversation/replyScan.test.ts
+@@ -0,0 +1,84 @@
++// l10n-allow-file: test fixture replies, not shipped UI.
++// A streaming reply's footnote order and folders (replyScan.ts) read at the cost of its tail, with
++// the same results as a scan of its whole text. The reveal draws the reply again on every display
++// frame; reading its whole text each time made a frame cost more the longer the reply grew.
++import { expect, test } from "bun:test";
++import { IncrementalMarkdown } from "./incrementalMarkdown";
++import { footnoteOrder } from "./markdownModel";
++import { replyFolders } from "../chips/replyFolders";
++import { ReplyScan } from "./replyScan";
++import { streamedReply } from "../loadFixture";
++
++/// Streams `text` in `step`-character deltas through the parser and the scan, checking each read
++/// against the whole-text scans; returns the characters each read scanned.
++function stream(text: string, step: number): number[] {
++  const parser = new IncrementalMarkdown();
++  const scan = new ReplyScan();
++  const reads: number[] = [];
++  for (let at = step; at < text.length + step; at += step) {
++    const source = text.slice(0, at);
++    parser.advance(source, { streaming: true });
++    const read = scan.read(source, parser.closedState);
++    expect(read.noteIds).toBe(footnoteOrder(source).join(" "));
++    expect(read.folderKey).toBe(replyFolders(source).join("\n"));
++    reads.push(scan.lastReadLength);
++  }
++  return reads;
++}
++
++test("each frame of a 20,000-word reply reads its tail, not the whole reply", () => {
++  let text = "";
++  for (let turn = 1; text.split(" ").length < 20_000; turn += 1) text += streamedReply(turn, 400);
++  const parser = new IncrementalMarkdown();
++  const scan = new ReplyScan();
++  // The reply as the row first shows it, then a frame a word longer.
++  parser.advance(text, { streaming: true });
++  scan.read(text, parser.closedState);
++  for (const word of [" more", " words", " arrive", "\n\nA new paragraph starts", " and grows."]) {
++    text += word;
++    parser.advance(text, { streaming: true });
++    const read = scan.read(text, parser.closedState);
++    expect(read.folderKey).toBe(replyFolders(text).join("\n"));
++    expect(read.noteIds).toBe(footnoteOrder(text).join(" "));
++    // Its newest paragraph, at most twice (folders and notes), never the 120 KB before it.
++    expect(scan.lastReadLength).toBeLessThan(4_000);
++    expect(text.length).toBeGreaterThan(100_000);
++  }
++});
++
++test("folders and footnotes stream the same as a whole-text scan", () => {
++  const text = [
++    "Read [the plan](docs/plan.md) first.[^a]\n\n",
++    "Then `src/app/main.ts` and webviews/src/ui/Button.tsx.\n\n",
++    "A span `opens here\n\nand closes` past a blank line [^skipped] and a note.[^b]\n\n",
++    "```ts\nconst x = [^not-a-note];\n```\n\n",
++    "```\nan open fence [^inside]\n\nstill code\n```\n\n",
++    "More paths: lib/one/a.rs, lib/two/b.rs, lib/three/c.rs.[^c]\n\n",
++    "- item [^a] again\n- item [^d]\n\n",
++    "[^a]: The first note.\n\n[^b]: The second.\n",
++  ].join("");
++  for (const step of [1, 3, 17]) stream(text, step);
++});
++
++test("a fence inside a $$ display and stray backticks still match the whole-text scan", () => {
++  const text = [
++    "$$\n```\n$$\n\nprose [^x] after\n\n",
++    "one ` backtick [^y]\n\n",
++    "and its pair ` then [^z]\n\n",
++    "path/to/file.ts done.[^w]\n",
++  ].join("");
++  for (const step of [1, 5]) stream(text, step);
++});
++
++test("a reply that is replaced starts its scan over", () => {
++  const parser = new IncrementalMarkdown();
++  const scan = new ReplyScan();
++  const first = "See /repo/a/one.ts.[^a]\n\nNext paragraph.\n\n";
++  parser.advance(first, { streaming: true });
++  scan.read(first, parser.closedState);
++  const second = "Other /repo/b/two.ts.[^b]\n\nNext.\n\n";
++  parser.advance(second, { streaming: true });
++  const read = scan.read(second, parser.closedState);
++  expect(read.folderKey).toBe("/repo/b/");
++  expect(read.noteIds).toBe("b");
++});
+diff --git a/webviews/src/agent-session/acpmux/conversation/replyScan.ts b/webviews/src/agent-session/acpmux/conversation/replyScan.ts
+new file mode 100644
+index 00000000000..57cd9bb7cec
+--- /dev/null
++++ b/webviews/src/agent-session/acpmux/conversation/replyScan.ts
+@@ -0,0 +1,77 @@
++// What Markdown reads off a reply's whole text (its footnote order and the folders its paths are
++// in), for a streaming reply at the cost of its tail. The reveal draws a reply again on every
++// display frame, and reading the whole text each time made a frame's cost grow with the reply:
++// at 20,000 words the folder scan alone ran its path pattern over 120 KB a frame. The closed
++// blocks' text (incrementalMarkdown.ts) never changes again, so each piece of it is read once, as
++// it closes; only the text after it is read on each frame. The results equal a scan of the whole
++// text (replyScan.test.ts): no folder pattern matches across the blank line a piece ends at, and a
++// piece adds its footnotes only once its fences and code spans close inside it (`footnotePiece`).
++import { MAX_REPLY_FOLDERS, replyFolders } from "../chips/replyFolders";
++import { footnoteOrder, footnotePiece } from "./markdownModel";
++
++export type ReplyScanResult = { noteIds: string; folderKey: string };
++
++export class ReplyScan {
++  private generation = -1;
++  /// The folders of the text before `foldersEnd`, in reading order.
++  private folders: string[] = [];
++  private foldersEnd = 0;
++  /// The footnote ids of the sealed text before `notesEnd`; `notesTried`, the closed end a piece
++  /// that was not sealed was last read to (so a frame with no new closed text does not read it again).
++  private notes: string[] = [];
++  private notesEnd = 0;
++  private notesTried = 0;
++  /// The characters the last read scanned (tests, perf).
++  lastReadLength = 0;
++
++  // perf-hot: 1ms/frame agent-chat-stream-reveal
++  /// The reply's footnote ids (space-joined) and folders (newline-joined), as Markdown keys them.
++  /// `closed` is where the parser's closed text ends and the generation it belongs to.
++  read(source: string, closed: { end: number; generation: number }): ReplyScanResult {
++    if (closed.generation !== this.generation || closed.end < this.foldersEnd || closed.end < this.notesEnd) {
++      this.generation = closed.generation;
++      this.folders = [];
++      this.foldersEnd = 0;
++      this.notes = [];
++      this.notesEnd = 0;
++      this.notesTried = 0;
++    }
++    const end = Math.min(closed.end, source.length);
++    this.lastReadLength = 0;
++    if (end > this.foldersEnd) {
++      if (this.folders.length < MAX_REPLY_FOLDERS) {
++        this.lastReadLength += end - this.foldersEnd;
++        this.folders = merge(this.folders, replyFolders(source.slice(this.foldersEnd, end)), MAX_REPLY_FOLDERS);
++      }
++      this.foldersEnd = end;
++    }
++    if (end > this.notesTried) {
++      this.notesTried = end;
++      this.lastReadLength += end - this.notesEnd;
++      const piece = footnotePiece(source.slice(this.notesEnd, end));
++      if (piece.sealed) {
++        this.notes = merge(this.notes, piece.ids);
++        this.notesEnd = end;
++      }
++    }
++    const folders =
++      this.folders.length < MAX_REPLY_FOLDERS
++        ? merge(this.folders, replyFolders(source.slice(this.foldersEnd)), MAX_REPLY_FOLDERS)
++        : this.folders;
++    if (this.folders.length < MAX_REPLY_FOLDERS) this.lastReadLength += source.length - this.foldersEnd;
++    this.lastReadLength += source.length - this.notesEnd;
++    const notes = merge(this.notes, footnoteOrder(source.slice(this.notesEnd)));
++    return { noteIds: notes.join(" "), folderKey: folders.join("\n") };
++  }
++}
++
++/// `head` followed by the entries of `more` it lacks, at most `cap` in all.
++function merge(head: string[], more: readonly string[], cap = Infinity): string[] {
++  if (!more.length) return head;
++  const out = [...head];
++  for (const entry of more) {
++    if (out.length >= cap) break;
++    if (!out.includes(entry)) out.push(entry);
++  }
++  return out;
++}
+diff --git a/webviews/src/agent-session/acpmux/direct.ts b/webviews/src/agent-session/acpmux/direct.ts
+index d156e5f15e4..1e54df1c436 100644
+--- a/webviews/src/agent-session/acpmux/direct.ts
++++ b/webviews/src/agent-session/acpmux/direct.ts
+@@ -243,6 +243,7 @@ import {
+ } from "./conversation/promptCoach";
+ import { promptCoachDismissed, rememberPromptCoachDismissed } from "./conversation/promptCoachDismissed";
+ import { promptCoachEnabled } from "./chatDisplay";
++import { keyFrame } from "./schedule/keyFrame";
+ import {
+   PRESET_APPROVAL,
+   PresetApprovalFold,
+@@ -2007,9 +2008,12 @@ function drawShown(): void {
+ /// waiting. A hidden page used to draw the shown chat's stream every 50 ms that nobody could see.
+ /// Whichever of the frame and the 50 ms fallback comes first cancels the other: the fallback left
+ /// waiting woke the page 50 ms after every drawn frame to do nothing (CMUX-571 idle wakeups).
++/// The first frame after a key draws the key alone: the stream's work waits one frame, once
++/// (schedule/keyFrame.ts), so the composer's echo never waits behind the transcript's commit.
+ export const nextFrame = (run: () => void): (() => void) => {
+   let done = false;
+   let stopPending: (() => void) | undefined;
++  let yielded = false;
+   const frame = () => {
+     if (done) return;
+     if (!pageShown()) return waitForShow(frame);
+@@ -2021,8 +2025,13 @@ export const nextFrame = (run: () => void): (() => void) => {
+       if (fallback !== undefined) clearTimeout(fallback);
+       stopPending = undefined;
+     };
+-    const once = () => {
++    const once = (frameTime?: number) => {
+       if (ran || done) return;
++      if (!yielded && typeof frameTime === "number" && keyFrame(frameTime)) {
++        yielded = true;
++        drawn = requestAnimationFrame(once);
++        return;
++      }
+       ran = true;
+       stop();
+       if (!pageShown()) return waitForShow(frame);
+@@ -11384,11 +11393,6 @@ export class AcpmuxDirectClient {
+     this.heldStartMode = { modeId, ticket, generation: this.selectionGeneration };
+   }
+ 
+-  /// The agent a sessionless chat's first send starts (the pane's host config), when it names one.
+-  get startHarness(): string | undefined {
+-    return this.host.harness;
+-  }
+-
+   async ensureSession(): Promise<string | undefined> {
+     // This send belongs to the requested chat. A refused or empty start must not send it to
+     // the previous chat, or start the default harness instead of the one the person picked.
+@@ -11401,12 +11405,7 @@ export class AcpmuxDirectClient {
+         this.create(this.host.harness, this.host.peer ? this.host.cwd : undefined, this.host.peer));
+       // The app also calls this before send(): an empty result must stop that preflight,
+       // otherwise send() would ensure again after the failed creation has been cleared.
+-      // `superseded`: another chat was selected (or the page closed) while the start was out, so it
+-      // is no failure of this chat's; App.tsx says nothing in the chat now shown.
+-      if (!sessionId)
+-        throw Object.assign(new Error(translate("error.notOpen")), {
+-          superseded: this.closed || generation !== this.selectionGeneration,
+-        });
++      if (!sessionId) throw new Error(translate("error.notOpen"));
+       // The newest pick for this chat, one made while the start was pending included. It goes to the
+       // session this start made, never the selected one: another chat picked while the ticket is
+       // pending must not take a held Bypass permissions.
+@@ -13253,33 +13252,7 @@ export class AcpmuxDirectClient {
+   }
+   /// `adopting`: the spare page's open of its tab's chat (`adoptSession`). A chat its list lacks that
+   /// fails to attach keeps the tail it drew on screen, for `adoptSession` to say why under it or drop.
+-  /// Shows and attaches `sessionId`: the chat once its attach is in, undefined when a selection of
+-  /// another chat won. A newer selection of this same chat (its store sub fell and opened it again as
+-  /// v1, `chatRows.fell`; a pick of it again) decides for this one too: its outcome is this one's,
+-  /// never undefined while that open attached the chat (issue 44964: a New Tab's first send read the
+-  /// superseded open as "cmux did not start a session" with the chat on screen).
+-  select(sessionId: string, adopting = false): Promise<string | undefined> {
+-    const opening = this.selectOnce(sessionId, adopting);
+-    const mine: { sessionId: string; result: Promise<string | undefined> } = { sessionId, result: opening };
+-    const sameChatAfter = () => {
+-      const newer = this.latestSelect;
+-      return newer !== mine && newer?.sessionId === sessionId ? newer.result : undefined;
+-    };
+-    mine.result = opening.then(
+-      (selected) => selected ?? sameChatAfter(),
+-      (error: unknown) => {
+-        const after = sameChatAfter();
+-        if (after) return after;
+-        throw error;
+-      },
+-    );
+-    this.latestSelect = mine;
+-    return mine.result;
+-  }
+-  /// The newest `select`, read by an older one of the same chat whose generation it moved.
+-  private latestSelect?: { sessionId: string; result: Promise<string | undefined> };
+-
+-  private async selectOnce(sessionId: string, adopting: boolean): Promise<string | undefined> {
++  async select(sessionId: string, adopting = false): Promise<string | undefined> {
+     this.pendingPeerTrust = undefined;
+     this.refusedPeerTrust = undefined;
+     const previousSessionId = this.selectedSessionId;
+@@ -13503,23 +13476,13 @@ export class AcpmuxDirectClient {
+     current: () => boolean = () => true,
+     failed?: (error: unknown) => void,
+     declined?: () => void,
+-    fenced = true,
+   ): Promise<any> {
+     const generation = this.selectionGeneration;
+     const trustCancellation = this.trustCancellation;
+     try {
+       const result = await this.request("session/new", params);
+-      // A canceled start owns neither the next Trust question nor one-shot startup defaults. One
+-      // whose caller owns its cancellation (`fenced` false: a harness switch's start, which a
+-      // selection of the same chat moves on, issue 44964) is fenced on Trust only. A session
+-      // dropped here is discarded, never left running with no tab.
+-      if ((fenced && generation !== this.selectionGeneration) || trustCancellation !== this.trustCancellation) {
+-        // Only a start this request made fresh is ours to end. An adopt resumes the person's own
+-        // conversation, which acpmux may already have bound to another pane: never killed here.
+-        const adopting = Boolean((params._meta as { acpmux?: { adopt?: unknown } } | undefined)?.acpmux?.adopt);
+-        if (result?.sessionId && !this.closed && !adopting) this.discard(String(result.sessionId));
+-        return undefined;
+-      }
++      // A canceled start owns neither the next Trust question nor one-shot startup defaults.
++      if (generation !== this.selectionGeneration || trustCancellation !== this.trustCancellation) return undefined;
+       return result;
+     } catch (error) {
+       const ownsRefusal =
+@@ -13604,10 +13567,6 @@ export class AcpmuxDirectClient {
+   ): Promise<string | undefined> {
+     this.cancelTrustStart?.();
+     const generation = this.selectionGeneration;
+-    // The one-shot startup picks a successful start consumes (startSession): a start the person
+-    // left gives them back, so the pane's next new chat still starts on them (issue 44964).
+-    const picks = { cwd: this.host.cwd, harness: this.host.harness, model: this.host.model, peer: this.host.peer };
+-    const folders = this.newChatFolders;
+     const started = (async () => {
+       // The New Tab request still owns its draft, attachments and machine. Trust resumes this
+       // same promise, so its sender runs once and never targets an unmounted chat composer.
+@@ -13658,17 +13617,7 @@ export class AcpmuxDirectClient {
+             );
+       // A user who opened another chat while session/new was out owns that selection.
+       if (this.closed || generation !== this.selectionGeneration) {
+-        if (sessionId && !this.closed) {
+-          this.discard(sessionId);
+-          this.host = {
+-            ...this.host,
+-            cwd: this.host.cwd ?? picks.cwd,
+-            harness: this.host.harness ?? picks.harness,
+-            model: this.host.model ?? picks.model,
+-            peer: this.host.peer ?? picks.peer,
+-          };
+-          this.newChatFolders ??= folders;
+-        }
++        if (sessionId && !this.closed) this.discard(sessionId);
+         return undefined;
+       }
+       if (sessionId) this.startedChat = { sessionId, visit: generation };
+@@ -13721,8 +13670,6 @@ export class AcpmuxDirectClient {
+         this.emit();
+       },
+       declined,
+-      // A local start's caller fences it (`create`, HarnessSwitch); a peer start is fenced below.
+-      Boolean(pending.peer),
+     );
+     // A deferred local harness switch intentionally leaves the displayed chat at first Send;
+     // HarnessSwitch owns that start's cancellation. Only peer starts use this route fence.
+diff --git a/webviews/src/agent-session/acpmux/keyFrame.test.ts b/webviews/src/agent-session/acpmux/keyFrame.test.ts
+new file mode 100644
+index 00000000000..bfa62b776a9
+--- /dev/null
++++ b/webviews/src/agent-session/acpmux/keyFrame.test.ts
+@@ -0,0 +1,99 @@
++// The first frame after a key draws the key alone (schedule/keyFrame.ts): the stream's frame work
++// (`nextFrame`, direct.ts) waits one frame, once, and runs in the frame after; with no key it runs
++// in its own frame. Leo, 2026-11-17: "we're not waiting for ui to render. we're just gonna have the
++// text be drawn fast".
++import { afterEach, beforeEach, describe, expect, test } from "bun:test";
++import { nextFrame } from "./direct";
++import { KEY_FRAME_MS, keyFrame, keyInAnotherPage, noteKeyForTest } from "./schedule/keyFrame";
++
++type Frame = (time: number) => void;
++let frames: Map<number, Frame>;
++let id = 0;
++const realRaf = globalThis.requestAnimationFrame;
++const realCancel = globalThis.cancelAnimationFrame;
++
++/** Runs the frames asked for so far, at `time`. */
++function tick(time: number): void {
++  const due = [...frames.values()];
++  frames.clear();
++  for (const run of due) run(time);
++}
++
++beforeEach(() => {
++  frames = new Map();
++  globalThis.requestAnimationFrame = ((run: Frame) => {
++    id += 1;
++    frames.set(id, run);
++    return id;
++  }) as typeof requestAnimationFrame;
++  globalThis.cancelAnimationFrame = ((handle: number) => void frames.delete(handle)) as typeof cancelAnimationFrame;
++  noteKeyForTest(Number.NEGATIVE_INFINITY);
++});
++
++afterEach(() => {
++  const host = globalThis as { requestAnimationFrame?: unknown; cancelAnimationFrame?: unknown };
++  if (realRaf) globalThis.requestAnimationFrame = realRaf;
++  else delete host.requestAnimationFrame;
++  if (realCancel) globalThis.cancelAnimationFrame = realCancel;
++  else delete host.cancelAnimationFrame;
++});
++
++describe("key frame", () => {
++  test("a key handled within one display interval before a frame makes it the key's frame", () => {
++    noteKeyForTest(100);
++    expect(keyFrame(110)).toBe(true);
++    expect(keyFrame(100 + KEY_FRAME_MS + 1)).toBe(false);
++  });
++
++  test("with no key, the stream draws in its own frame", () => {
++    let runs = 0;
++    const cancel = nextFrame(() => (runs += 1));
++    tick(1000);
++    expect(runs).toBe(1);
++    cancel();
++  });
++
++  test("a key's frame draws the key alone; the stream draws in the next frame", () => {
++    let runs = 0;
++    const cancel = nextFrame(() => (runs += 1));
++    noteKeyForTest(995);
++    tick(1000);
++    expect(runs).toBe(0);
++    tick(1016);
++    expect(runs).toBe(1);
++    cancel();
++  });
++
++  test("the stream waits once: a key in every frame never starves it", () => {
++    let runs = 0;
++    const cancel = nextFrame(() => (runs += 1));
++    noteKeyForTest(995);
++    tick(1000);
++    noteKeyForTest(1010);
++    tick(1016);
++    expect(runs).toBe(1);
++    cancel();
++  });
++
++  test("a key typed in another chat page of the renderer keeps this page's stream out of that frame", () => {
++    let runs = 0;
++    const cancel = nextFrame(() => (runs += 1));
++    keyInAnotherPage();
++    tick(performance.now() + 1);
++    expect(runs).toBe(0);
++    tick(performance.now() + 18);
++    expect(runs).toBe(1);
++    cancel();
++  });
++
++  test("a cancelled wait runs nothing, also after it yielded to a key", () => {
++    let runs = 0;
++    const cancel = nextFrame(() => (runs += 1));
++    noteKeyForTest(995);
++    tick(1000);
++    cancel();
++    tick(1016);
++    expect(runs).toBe(0);
++    expect(frames.size).toBe(0);
++  });
++});
+diff --git a/webviews/src/agent-session/acpmux/loadDebug.ts b/webviews/src/agent-session/acpmux/loadDebug.ts
+index 1c7fea0514b..036e2e51913 100644
+--- a/webviews/src/agent-session/acpmux/loadDebug.ts
++++ b/webviews/src/agent-session/acpmux/loadDebug.ts
+@@ -22,6 +22,10 @@ export type LoadRunOptions = {
+   scroll_speed?: number;
+   /// How far up the scroll goes before it turns back, in viewports.
+   scroll_depth?: number;
++  /// A reply this many words long arrives at once and reveals (for `reply_settle_ms`, default
++  /// 1500) before the timed stream appends to it: per-frame cost against the reply's length.
++  reply_words?: number;
++  reply_settle_ms?: number;
+ };
+ 
+ const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
+@@ -132,6 +136,8 @@ export async function loadRun(
+     chunkChars: Math.max(1, Math.floor(options.chunk_chars ?? 32)),
+     chunkMs: Math.max(1, options.chunk_ms ?? 4),
+     toolEvery: Math.max(0, Math.floor(options.tool_every ?? 60)),
++    prefixWords: options.reply_words,
++    prefixSettleMs: options.reply_settle_ms,
+   });
+   let streamDone = false;
+   void streaming.then(() => (streamDone = true));
+diff --git a/webviews/src/agent-session/acpmux/mock.ts b/webviews/src/agent-session/acpmux/mock.ts
+index a6932281845..92c055deef1 100644
+--- a/webviews/src/agent-session/acpmux/mock.ts
++++ b/webviews/src/agent-session/acpmux/mock.ts
+@@ -248,7 +248,15 @@ export function mockTurn(prompt: string, turn: number): Step[] {
+ 
+ /// How a load run streams its turn: text deltas of `chunkChars` every `chunkMs`, and a large
+ /// tool call (a log or an edit) after every `toolEvery` deltas.
+-export type LoadStreamOptions = { seconds: number; chunkChars: number; chunkMs: number; toolEvery: number };
++export type LoadStreamOptions = {
++  seconds: number;
++  chunkChars: number;
++  chunkMs: number;
++  toolEvery: number;
++  /// Words of reply that arrive at once before the timed stream, and how long they get to reveal.
++  prefixWords?: number;
++  prefixSettleMs?: number;
++};
+ 
+ /// Whether `event` is subagent `id`'s own record (hub/paging.rs `subagent_owns`): an agent update
+ /// acpmux tagged with it (`_meta.acpmux.subagent`) or one that starts or changes it (`subagents[].id`).
+@@ -443,11 +451,23 @@ export class MockAcpmuxSocket {
+     this.touch(target, { turnCount: turn, status: "running", indicator: "working" });
+     this.emit(target, { mux: "user_message", msg: { text: `Turn ${turn}: stream a long answer` } });
+     this.emit(target, { mux: "turn_started" });
+-    const reply = streamedReply(turn, 400);
+-    const end = performance.now() + options.seconds * 1000;
++    let reply = streamedReply(turn, 400);
+     let at = 0;
+     let deltas = 0;
+     let tools = 0;
++    // A long reply already on screen (`prefixWords`): its first words arrive in one delta and get
++    // `prefixSettleMs` to reveal, then the timed stream goes on from where they end, so a frame's
++    // cost can be read against the reply's length.
++    const words = Math.max(0, Math.floor(options.prefixWords ?? 0));
++    if (words > 0) {
++      for (let more = 1; reply.split(" ").length < words * 2; more += 1) reply += streamedReply(turn + more, 400);
++      const prefix = reply.split(" ").slice(0, words).join(" ");
++      this.emit(target, { update: text(prefix) });
++      deltas += 1;
++      at = prefix.length;
++      await this.delay(options.prefixSettleMs ?? 1500);
++    }
++    const end = performance.now() + options.seconds * 1000;
+     while (performance.now() < end && !this.closed) {
+       await this.delay(options.chunkMs);
+       const chunk = reply.slice(at % reply.length, (at % reply.length) + options.chunkChars);
+diff --git a/webviews/src/agent-session/acpmux/model.ts b/webviews/src/agent-session/acpmux/model.ts
+index c5c05d0eab7..b76d7c74d9a 100644
+--- a/webviews/src/agent-session/acpmux/model.ts
++++ b/webviews/src/agent-session/acpmux/model.ts
+@@ -1533,10 +1533,16 @@ export type PreparedRow = {
+   closedEnd: number;
+   /// The characters the last update lexed (tests, perf).
+   lexedLength: number;
++  /// The blocks the last update measured (tests, perf): the ones closed since, and the tail's.
++  measuredBlocks?: number;
+   /// Measured text by its source, kept across a streaming row's versions; null where it can't be measured.
+   prepared: Map<string, PreparedText | null>;
+   /// A plain user row's final line height, keyed by text, font, line height and width.
+   plainHeight?: { key: string; height: number };
++  /// The summed heights of the first `count` closed blocks (`last` the last of them), at the width
++  /// and metrics `key` names, and the prepared texts they read: a streaming reply measures only
++  /// the blocks that closed since and its tail, never every block again for each delta.
++  closedHeight?: { key: string; count: number; last: Token | undefined; height: number; used: Set<string> };
+ };
+ 
+ export type ConversationLayout = {
+@@ -2593,15 +2599,37 @@ function trimPreparedCache(
+   prepared: Map<string, PreparedText | null>,
+   blockCount: number,
+   used: ReadonlySet<string>,
++  /// The closed blocks' prepared texts, measured once (`closedHeight`) and kept as used.
++  kept?: ReadonlySet<string>,
+ ): void {
+-  const limit = Math.max(PREPARED_CACHE_MIN, PREPARED_CACHE_PER_BLOCK * blockCount, used.size);
++  const limit = Math.max(PREPARED_CACHE_MIN, PREPARED_CACHE_PER_BLOCK * blockCount, used.size + (kept?.size ?? 0));
+   if (prepared.size <= limit) return;
+   for (const key of prepared.keys()) {
+     if (prepared.size <= limit) break;
+-    if (!used.has(key)) prepared.delete(key);
++    if (!used.has(key) && !kept?.has(key)) prepared.delete(key);
+   }
+ }
+ 
++/// The sum of `entry`'s closed block heights in a column `width` wide: the blocks measured before
++/// at the same width and metrics count as they did, and only the ones that closed since measure.
++// perf-hot: 1ms/delta agent-chat-stream-reveal
++function closedBlocksHeight(entry: PreparedRow, width: number): { height: number; used: Set<string> } {
++  const closed = entry.closedBlocks;
++  const { measureFont, lineHeight, blockCodeSize, codeLineHeight, codeCharWidth } = metrics();
++  const key = `${width}\n${measureFont}\n${lineHeight}\n${blockCodeSize}\n${codeLineHeight}\n${codeCharWidth}`;
++  let kept = entry.closedHeight;
++  // The closed blocks only grow by appending; dropped (a text that is not this one's continuation),
++  // their objects are new, so the last one measured is not where it was.
++  if (!kept || kept.key !== key || kept.count > closed.length || (kept.count && closed[kept.count - 1] !== kept.last))
++    kept = { key, count: 0, last: undefined, height: 0, used: new Set() };
++  let height = kept.height;
++  entry.measuredBlocks = closed.length - kept.count;
++  for (let index = kept.count; index < closed.length; index += 1)
++    height += blockHeight(closed[index]!, width, entry.prepared, kept.used);
++  entry.closedHeight = { key, count: closed.length, last: closed.at(-1), height, used: kept.used };
++  return entry.closedHeight;
++}
++
+ function textHeight(
+   text: string,
+   width: number,
+@@ -2960,6 +2988,7 @@ function measuredRowHeight(
+   const contentWidth = Math.max(80, row.kind === "user" ? USER_BUBBLE_SHARE * width - userBubbleSides() : width);
+   const picks = row.kind === "user" && !inline && !pasted && !plainUser ? sentUIPickSegments(row.text) : undefined;
+   const usedPrepared = new Set<string>();
++  let keptPrepared: Set<string> | undefined;
+   let contentHeight: number;
+   if (plainUser) {
+     // UserBubble -> PromptText draws this as literal spans, so avoid preparing Markdown tokens.
+@@ -3003,14 +3032,19 @@ function measuredRowHeight(
+           );
+     } else {
+       if (entry.blocks.length === 0) return fallbackRowHeight(row, width, beforeFooter, lastTurn, actions);
+-      contentHeight = (entry.blocks.length - 1) * blockGap();
+-      for (const block of entry.blocks) contentHeight += blockHeight(block, contentWidth, entry.prepared, usedPrepared);
++      // `entry.blocks` is the closed blocks followed by the tail's (lexIncrementally).
++      const closed = closedBlocksHeight(entry, contentWidth);
++      keptPrepared = closed.used;
++      contentHeight = (entry.blocks.length - 1) * blockGap() + closed.height;
++      for (let index = entry.closedBlocks.length; index < entry.blocks.length; index += 1)
++        contentHeight += blockHeight(entry.blocks[index]!, contentWidth, entry.prepared, usedPrepared);
++      entry.measuredBlocks! += entry.blocks.length - entry.closedBlocks.length;
+     }
+   }
+   // A stream changes only its tail block. Preserve prepared entries for the unchanged blocks and
+   // trim stale revisions once per row, never once per token or across the transcript. `usedPrepared`
+   // includes list items, whose text count can be much larger than the block count.
+-  trimPreparedCache(entry.prepared, entry.blocks.length, usedPrepared);
++  trimPreparedCache(entry.prepared, entry.blocks.length, usedPrepared, keptPrepared);
+   // A long prompt opens collapsed to its first lines over Show more (conversation/UserBubble.tsx); a
+   // Chief's draws its own bubble (ChiefPromptBubble.tsx).
+   if (row.kind === "user" && row.from !== "chief" && !chiefEnvelope(row.text))
+diff --git a/webviews/src/agent-session/acpmux/mountModel.tsx b/webviews/src/agent-session/acpmux/mountModel.tsx
+index 9d294482976..174f8543dd6 100644
+--- a/webviews/src/agent-session/acpmux/mountModel.tsx
++++ b/webviews/src/agent-session/acpmux/mountModel.tsx
+@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
+ import { AcpmuxApp, type InitialChat } from "./App";
+ import { PaneBoundary } from "./PaneBoundary";
+ import { AcpmuxDirectClient, nextFrame } from "./direct";
++import { watchKeys } from "./schedule/keyFrame";
+ import { UiProvider } from "../../ui/UiProvider";
+ import { nativePopupHost } from "../../ui/popupHost";
+ import { installNativeMenu } from "../../ui/nativeMenu";
+@@ -39,6 +40,8 @@ reportChatSnapshot(postNative);
+ 
+ // One transcript snapshot per display frame, however many deltas land in it.
+ AcpmuxDirectClient.scheduleFrame = nextFrame;
++// A key here, or in any other chat page of this renderer, keeps stream work out of its frame.
++watchKeys();
+ document.documentElement.dataset.cmuxWebviewKind = "acpmux-agent-session";
+ // The native context menu learns which message is under the pointer (conversation/messageMenu.ts).
+ installMessageMenuReporter(document);
+diff --git a/webviews/src/agent-session/acpmux/perf.ts b/webviews/src/agent-session/acpmux/perf.ts
+index 70130c252bf..fb3e659e902 100644
+--- a/webviews/src/agent-session/acpmux/perf.ts
++++ b/webviews/src/agent-session/acpmux/perf.ts
+@@ -146,7 +146,16 @@ export class FrameRing {
+ /// wait for the key to reach the page: the app, its web view and the page's main thread), `work` when the
+ /// key's edit and its render were done (a task queued from its `input` event, after the microtasks
+ /// ProseMirror and React run it in), `frame` the next frame's start and `paint` after that frame.
+-export type TypingSample = { frame: number; paint: number; listener?: number; work?: number };
++export type TypingSample = {
++  frame: number;
++  paint: number;
++  listener?: number;
++  work?: number;
++  /** Key to the start of the frame that draws it (the rAF's frame time): the wait for the display's tick. */
++  tick?: number;
++  /** That frame's start to the key's own rAF callback: the frame callbacks that ran ahead of it. */
++  ahead?: number;
++};
+ type AgentMark = "handshakeStart" | "handshakeReady" | "composerReady" | "snapshotPaint" | "firstToken";
+ /**
+  * The page's connect path on the wall clock (`Date.now()`), the first time of each since the page
+@@ -169,6 +178,8 @@ export function typingSummary(samples: TypingSample[]) {
+     to_paint: summary(samples.map((sample) => sample.paint)),
+     to_listener: summary(samples.flatMap((sample) => (sample.listener === undefined ? [] : [sample.listener]))),
+     to_work: summary(samples.flatMap((sample) => (sample.work === undefined ? [] : [sample.work]))),
++    to_tick: summary(samples.flatMap((sample) => (sample.tick === undefined ? [] : [sample.tick]))),
++    tick_to_callback: summary(samples.flatMap((sample) => (sample.ahead === undefined ? [] : [sample.ahead]))),
+   };
+ }
+ 
+@@ -223,11 +234,16 @@ export class AcpmuxPerf {
+         done.port2.postMessage(0);
+       };
+       page.addEventListener("input", input, { capture: true, once: true });
+-      requestAnimationFrame(() => {
++      requestAnimationFrame((tick) => {
+         const frame = performance.now();
++        sample.tick = tick - start;
++        sample.ahead = frame - tick;
++        // A trace's handle on the key's frame callback and its paint (bench/keyFrameTrace.ts).
++        performance.mark?.("acpmux:key-frame");
+         page.removeEventListener("input", input, { capture: true });
+         const channel = new MessageChannel();
+         channel.port1.onmessage = () => {
++          performance.mark?.("acpmux:key-paint");
+           sample.frame = frame - start;
+           sample.paint = performance.now() - start;
+           this.typing.push(sample);
+diff --git a/webviews/src/agent-session/acpmux/schedule/keyFrame.ts b/webviews/src/agent-session/acpmux/schedule/keyFrame.ts
+new file mode 100644
+index 00000000000..6e8aa2fb0fe
+--- /dev/null
++++ b/webviews/src/agent-session/acpmux/schedule/keyFrame.ts
+@@ -0,0 +1,63 @@
++/**
++ * The frame after a key draws the key first (cmuxterm-hq docs/design/chat-instant-under-load.md, "input"
++ * lane; Leo, 2026-11-17: "we're not waiting for ui to render. we're just gonna have the text be drawn fast").
++ *
++ * A streamed reply commits in a frame callback; when a key lands, the next frame used to carry both the
++ * composer's echo and the transcript's commit, its React render, layout and the rows' restyle, so the
++ * character showed only after the stream's work. `keyFrame(frameTime)` says a key was handled in the
++ * display interval before `frameTime`: the stream's frame work (`nextFrame` in direct.ts) then waits one
++ * frame, once, and the key's frame paints the composer alone. The stream loses one intermediate state per
++ * key, never a frame and never text: its next frame draws everything that arrived.
++ *
++ * Every agent chat page shares one renderer and so one main thread (CEFSwitches.swift
++ * `processPerSitePageSchemes`): a key typed in one chat also waited behind every other chat's stream
++ * commit in that frame. The page that takes the key says so on a same-origin BroadcastChannel, and
++ * every other chat page's stream work waits that frame too.
++ *
++ * Capture-phase listeners on the window and one channel, installed once on first use; nothing runs
++ * between keys.
++ */
++
++/** A key handled this long before a frame's start makes it that key's frame (one 60 Hz interval). */
++export const KEY_FRAME_MS = 17;
++
++const KEY_EVENTS = ["keydown", "beforeinput", "compositionupdate"] as const;
++const CHANNEL = "cmux-agent-key-frame";
++
++let lastKeyAt = Number.NEGATIVE_INFINITY;
++let listening = false;
++
++function listen(): void {
++  if (listening || typeof performance === "undefined") return;
++  listening = true;
++  const channel = typeof BroadcastChannel === "function" ? new BroadcastChannel(CHANNEL) : undefined;
++  if (channel) channel.onmessage = keyInAnotherPage;
++  // One post per key: `beforeinput` and `compositionupdate` follow their keydown in the same interval.
++  const mark = (event: Event) => {
++    lastKeyAt = performance.now();
++    if (event.type === "keydown") channel?.postMessage(0);
++  };
++  if (typeof window === "undefined") return;
++  for (const type of KEY_EVENTS) window.addEventListener(type, mark, { capture: true, passive: true });
++}
++
++/** Another chat page of this renderer took a key (its channel message): this page's next frame is that key's. */
++export function keyInAnotherPage(): void {
++  lastKeyAt = performance.now();
++}
++
++/** Whether a key was handled within KEY_FRAME_MS before `frameTime` (a rAF timestamp). */
++export function keyFrame(frameTime: number): boolean {
++  listen();
++  return frameTime - lastKeyAt < KEY_FRAME_MS;
++}
++
++/** Starts listening before the first frame asks (the pane calls it at mount). */
++export function watchKeys(): void {
++  listen();
++}
++
++/** For tests: a key handled at `at` (performance.now time). */
++export function noteKeyForTest(at: number): void {
++  lastKeyAt = at;
++}
+diff --git a/webviews/src/agent-session/acpmux/streamingRowEstimate.test.ts b/webviews/src/agent-session/acpmux/streamingRowEstimate.test.ts
+new file mode 100644
+index 00000000000..515bb479218
+--- /dev/null
++++ b/webviews/src/agent-session/acpmux/streamingRowEstimate.test.ts
+@@ -0,0 +1,41 @@
++// l10n-allow-file: geometry fixtures, not shipped UI.
++// A streaming reply's height estimate (model.ts measuredRowHeight) measures only the blocks that
++// closed since the last delta and its tail: a delta into a 20,000-word reply measured each of its
++// hundreds of blocks again, so the transcript's layout cost grew with the reply. The estimate is
++// the same as a fresh measure of the whole reply.
++import { expect, test } from "bun:test";
++import { layoutConversation, type AcpmuxRow, type PreparedRow } from "./model";
++import { streamedReply } from "./loadFixture";
++
++const reply = (text: string, version: number): AcpmuxRow => ({ id: "a1", version, at: 0, kind: "assistant", text });
++
++test("a delta into a 20,000-word reply measures its tail, and the estimate matches a fresh one", () => {
++  let text = "";
++  for (let turn = 1; text.split(" ").length < 20_000; turn += 1) text += streamedReply(turn, 400);
++  const cache = new Map<string, PreparedRow>();
++  layoutConversation([reply(text, 1)], 720, cache);
++  const words = [" more", " words", " arrive", "\n\nA new paragraph starts", " and grows", " a line longer."];
++  words.forEach((word, index) => {
++    text += word;
++    const streamed = layoutConversation([reply(text, index + 2)], 720, cache);
++    const entry = cache.get("a1")!;
++    expect(entry.blocks.length).toBeGreaterThan(300);
++    // The blocks that closed with this delta and the tail's, never the hundreds before them.
++    expect(entry.measuredBlocks).toBeLessThanOrEqual(3);
++    const fresh = layoutConversation([reply(text, index + 2)], 720);
++    expect(streamed.heights[0]).toBeCloseTo(fresh.heights[0]!, 6);
++  });
++  // Another width measures every block again, at that width.
++  const narrow = layoutConversation([reply(text, 99)], 500, cache);
++  expect(cache.get("a1")!.measuredBlocks).toBe(cache.get("a1")!.blocks.length);
++  expect(narrow.heights[0]).toBeCloseTo(layoutConversation([reply(text, 99)], 500).heights[0]!, 6);
++});
++
++test("a reply replaced by another text measures the new text whole", () => {
++  const cache = new Map<string, PreparedRow>();
++  const first = "First paragraph of the reply.\n\nSecond paragraph.\n\nThird, still";
++  layoutConversation([reply(first, 1)], 720, cache);
++  const other = "Another reply entirely, with one paragraph that runs on and on.\n\nAnd a second one.\n\nTail";
++  const replaced = layoutConversation([reply(other, 2)], 720, cache);
++  expect(replaced.heights[0]).toBeCloseTo(layoutConversation([reply(other, 2)], 720).heights[0]!, 6);
++});
+diff --git a/webviews/test/agent-pane-key-frame.test.ts b/webviews/test/agent-pane-key-frame.test.ts
+new file mode 100644
+index 00000000000..3b205cf3b91
+--- /dev/null
++++ b/webviews/test/agent-pane-key-frame.test.ts
+@@ -0,0 +1,105 @@
++// A keystroke paints before the stream's next draw (Leo, 2026-11-17: "why should typing... wait on
++// rendering???"). The transcript's frame scheduler (`nextFrame`) ran the stream's draw in the first
++// frame after a key, and the letter painted only after it: key to frame p50 1.6 ms idle against
++// 12.9 ms while a reply streamed (bench/composer-typing.bench.ts, 1,500 rows). The first frame after
++// a key now draws none of the stream; the draw takes the next frame. Once per key, every draw asked
++// for in that frame alike, and never the 50 ms fallback, which stays the bound.
++import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
++import { JSDOM } from "jsdom";
++import { settleReact } from "./support/domTeardown";
++
++const dom = new JSDOM("<!doctype html>", { url: "http://localhost/" });
++const scope = globalThis as Record<string, unknown>;
++const keys = ["window", "document", "requestAnimationFrame", "cancelAnimationFrame"] as const;
++const saved = keys.map((key) => [key, key in scope, scope[key]] as const);
++let frames = new Map<number, (time: number) => void>();
++let frameIds = 0;
++let frameTime = 1000;
++
++beforeAll(() => {
++  scope.window = dom.window;
++  scope.document = dom.window.document;
++  scope.requestAnimationFrame = (run: (time: number) => void) => {
++    frameIds += 1;
++    frames.set(frameIds, run);
++    return frameIds;
++  };
++  scope.cancelAnimationFrame = (id: number) => frames.delete(id);
++  Object.defineProperty(dom.window.document, "visibilityState", { configurable: true, get: () => "visible" });
++});
++
++afterAll(async () => {
++  await settleReact();
++  for (const [key, had, value] of saved)
++    if (had) scope[key] = value;
++    else delete scope[key];
++  dom.window.close();
++});
++
++beforeEach(() => {
++  frames = new Map();
++});
++
++const { nextFrame } = await import("../src/agent-session/acpmux/direct");
++
++/// One display frame: every callback asked for before it, with the frame's time.
++function drawFrame(): void {
++  frameTime += 16.7;
++  const due = [...frames.values()];
++  frames = new Map();
++  for (const run of due) run(frameTime);
++}
++
++function key(): void {
++  dom.window.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "a" }));
++}
++
++test("with no key, the stream draws in the next frame", () => {
++  let drawn = 0;
++  nextFrame(() => (drawn += 1));
++  drawFrame();
++  expect(drawn).toBe(1);
++});
++
++test("the first frame after a key draws none of the stream; the next draws it", () => {
++  let drawn = 0;
++  nextFrame(() => (drawn += 1));
++  key();
++  drawFrame();
++  expect(drawn).toBe(0);
++  drawFrame();
++  expect(drawn).toBe(1);
++});
++
++test("every draw asked for in the key's frame waits, not only the first", () => {
++  const drawn: string[] = [];
++  nextFrame(() => drawn.push("this chat"));
++  nextFrame(() => drawn.push("another chat"));
++  key();
++  drawFrame();
++  expect(drawn).toEqual([]);
++  drawFrame();
++  expect(drawn).toEqual(["this chat", "another chat"]);
++});
++
++test("one key defers the stream once: a draw asked for after it is not deferred again", () => {
++  let drawn = 0;
++  nextFrame(() => (drawn += 1));
++  key();
++  drawFrame();
++  drawFrame();
++  expect(drawn).toBe(1);
++  nextFrame(() => (drawn += 1));
++  drawFrame();
++  expect(drawn).toBe(2);
++});
++
++test("the 50 ms fallback draws even right after a key", async () => {
++  // No display frame comes (an occluded window): the fallback timer draws.
++  let drawn = 0;
++  nextFrame(() => (drawn += 1));
++  await new Promise((resolve) => setTimeout(resolve, 40));
++  key();
++  await new Promise((resolve) => setTimeout(resolve, 30));
++  expect(drawn).toBe(1);
++});
+diff --git a/webviews/test/composer-keystroke-isolation-browser.test.ts b/webviews/test/composer-keystroke-isolation-browser.test.ts
+new file mode 100644
+index 00000000000..d6f8348ce4d
+--- /dev/null
++++ b/webviews/test/composer-keystroke-isolation-browser.test.ts
+@@ -0,0 +1,380 @@
++// cmux-web-test-timeout: 420
++// l10n-allow-file: typed test keys, not shipped UI.
++// A keystroke in the agent chat's prompt is the browser's own text edit and the composer's render,
++// nothing else: no React component outside the composer commits, and no layout starts outside the
++// composer's box (Leo, 2026-11-17: "why should typing... wait on rendering??? why should typing
++// even cause rendering"; "typing is still slow in the composer in this version").
++//
++// composer-keystroke-renders-browser.test.ts counts the components that carry an `acpmuxPerf.render`
++// counter (the pane root, the transcript, rows, two composer parts). This file counts every one: a
++// React DevTools hook installed before the page's code sees each commit, walks the fibers that
++// rendered in it (mounted, or did work this commit), and names each one outside the composer's
++// subtree (ComposerFrame and what it renders, portals included). A Chromium trace over the same keys
++// names every element a key marked as needing layout: one outside the composer's form means a key
++// reflowed the pane.
++//
++// Two windows on a 1,500-row chat built as it ships (production React, React Compiler on; unminified
++// so the report names components):
++//   idle    every commit in the window is the keys': none may render outside the composer.
++//   growth  Shift-Return lines grow the box: at most one transcript commit a line (a ratchet; see the test).
++//   stream  a reply streams (loadRun) while the keys are typed: what the same stream renders outside
++//           the composer with nobody typing (run first) is allowed; anything more is the keys'.
++//           Production React hands the hook no commit priority, so the keys' commits cannot be told
++//           from the stream's that way.
++// Pattern page: cmuxterm-hq docs/handbook/keystroke-renders-only-the-composer.md.
++// Locally: CMUX_BROWSER_TESTS=1 bun test test/composer-keystroke-isolation-browser.test.ts
++import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
++import fs from "node:fs";
++import os from "node:os";
++import path from "node:path";
++import { chromium, type Browser, type Page } from "playwright";
++import { probeEngineOrSkip, requireBrowserLane } from "./support/requireBrowserLane";
++
++/// Init script, self-contained: a DevTools hook that records, per commit, the components that rendered
++/// outside the composer and how many rendered inside it.
++function installCommitWatch() {
++  type Fiber = {
++    tag: number;
++    type: any;
++    elementType: any;
++    flags: number;
++    child: Fiber | null;
++    sibling: Fiber | null;
++    alternate: Fiber | null;
++  };
++  type Commit = { at: number; inside: number; outside: string[] };
++  const w = window as any;
++  const commits: Commit[] = [];
++  w.__keystrokeCommits = commits;
++  // Function, class, forwardRef, memo, simple memo components: the ones that run code on a render.
++  const COMPONENT = new Set([0, 1, 11, 14, 15]);
++  const PERFORMED_WORK = 1;
++  const nameOf = (fiber: Fiber) => {
++    const type = fiber.type ?? fiber.elementType;
++    if (!type) return `tag${fiber.tag}`;
++    return (
++      type.displayName ||
++      type.name ||
++      type.render?.displayName ||
++      type.render?.name ||
++      type.type?.displayName ||
++      type.type?.name ||
++      `tag${fiber.tag}`
++    );
++  };
++  const COMPOSER = /^(Composer|ComposerFrame|MemoComposer)(\$\d+)?$/;
++  let renderers = 0;
++  w.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
++    supportsFiber: true,
++    isDisabled: false,
++    renderers: new Map(),
++    inject(internals: unknown) {
++      renderers += 1;
++      this.renderers.set(renderers, internals);
++      return renderers;
++    },
++    checkDCE() {},
++    onScheduleFiberRoot() {},
++    onCommitFiberUnmount() {},
++    onPostCommitFiberRoot() {},
++    onCommitFiberRoot(_id: number, root: { current: Fiber }) {
++      const commit: Commit = { at: performance.now(), inside: 0, outside: [] };
++      // Depth-first over the subtrees this commit touched: a fiber whose children are the previous
++      // tree's own bailed out whole, and nothing under it rendered.
++      const stack: [Fiber, boolean][] = [];
++      const top = root.current;
++      if (top.child) stack.push([top.child, false]);
++      while (stack.length) {
++        const [fiber, insideParent] = stack.pop()!;
++        if (fiber.sibling) stack.push([fiber.sibling, insideParent]);
++        const component = COMPONENT.has(fiber.tag);
++        const inside = insideParent || (component && COMPOSER.test(nameOf(fiber)));
++        const previous = fiber.alternate;
++        if (component && (previous === null || (fiber.flags & PERFORMED_WORK) !== 0)) {
++          if (inside) commit.inside += 1;
++          else commit.outside.push(nameOf(fiber));
++        }
++        if (fiber.child && (previous === null || fiber.child !== previous.child)) stack.push([fiber.child, inside]);
++      }
++      if (commit.inside || commit.outside.length) commits.push(commit);
++    },
++  };
++}
++
++type Commit = { at: number; inside: number; outside: string[] };
++
++await requireBrowserLane("composer-keystroke-isolation-browser.test.ts", async () => {
++  if (!(await probeEngineOrSkip("composer-keystroke-isolation-browser", "chromium", chromium))) return;
++  setDefaultTimeout(400_000);
++  const webviews = path.resolve(import.meta.dir, "..");
++  const PROMPT = ".acpmux-composer-prompt[contenteditable='true'], .acpmux-composer-prompt [contenteditable='true']";
++  const KEYS = 16;
++  const out = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), "composer-keystroke-isolation-"));
++  let statics: ReturnType<typeof Bun.serve> | undefined;
++  let browser: Browser;
++
++  beforeAll(async () => {
++    const { build } = await import("vite");
++    await build({
++      configFile: path.join(webviews, "vite.config.acpmux-pane.mjs"),
++      // Unminified: the report names components. Same React (production) and compiler pass.
++      build: { outDir: out, emptyOutDir: true, minify: false },
++      logLevel: "error",
++    });
++    statics = Bun.serve({
++      port: 0,
++      hostname: "127.0.0.1",
++      async fetch(request) {
++        const pathname = new URL(request.url).pathname;
++        const file = Bun.file(path.join(out, pathname === "/" ? "index.html" : pathname));
++        return (await file.exists()) ? new Response(file) : new Response("not found", { status: 404 });
++      },
++    });
++    browser = await chromium.launch({ headless: true });
++  });
++  afterAll(async () => {
++    await browser?.close();
++    await statics?.stop(true);
++    fs.rmSync(out, { recursive: true, force: true });
++  });
++
++  async function openChat(): Promise<Page> {
++    const page = await browser.newPage({ viewport: { width: 1100, height: 820 } });
++    await page.addInitScript(installCommitWatch);
++    await page.goto(`http://127.0.0.1:${statics!.port!}/?mock`);
++    await page.waitForFunction(() => "cmuxAcpmuxDebug" in window, null, { timeout: 60_000 });
++    const seeded = (await page.evaluate(() => (window as any).cmuxAcpmuxDebug.loadSeed(500, { light: true }))) as {
++      rows?: number;
++      error?: string;
++    };
++    expect(seeded.error).toBeUndefined();
++    expect(seeded.rows ?? 0).toBeGreaterThan(1000);
++    const prompt = page.locator(PROMPT).first();
++    await prompt.waitFor({ timeout: 30_000 });
++    await prompt.click();
++    // The first keys load the composer's lazy parts (emoji data, the mention index).
++    for (const key of "warm") await page.keyboard.press(key);
++    await shows(page, "warm");
++    for (let i = 0; i < 4; i += 1) await page.keyboard.press("Backspace");
++    await shows(page, "");
++    // Debounced work the warm-up keys started (a draft save, a suggestion index) lands before the window.
++    await page.waitForTimeout(1_500);
++    await settled(page);
++    return page;
++  }
++  const shows = (page: Page, text: string) =>
++    page.waitForFunction(
++      ([selector, want]) => {
++        const shown = (document.querySelector(selector!)?.textContent ?? "").trim();
++        return want === "" ? !shown.includes("warm") : shown === want;
++      },
++      [PROMPT, text] as const,
++    );
++  // Two frames after the last change: every render the key started has committed.
++  const settled = (page: Page) =>
++    page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
++
++  /// Types KEYS letters, each waited on until it shows, then waits out the keys' debounced and idle
++  /// work; returns the commits in that window.
++  async function typeKeys(page: Page): Promise<Commit[]> {
++    const since = (await page.evaluate(() => performance.now())) as number;
++    const typed = "abcdefghijklmnop".slice(0, KEYS);
++    for (let i = 0; i < typed.length; i += 1) {
++      await page.keyboard.press(typed[i]!);
++      await shows(page, typed.slice(0, i + 1));
++      await page.waitForTimeout(60);
++    }
++    // Past the composer's draft-save debounce: work a key defers still counts as the key's.
++    await page.waitForTimeout(1_500);
++    await settled(page);
++    return (await page.evaluate(
++      (from) => ((window as any).__keystrokeCommits as Commit[]).filter((commit) => commit.at >= from),
++      since,
++    )) as Commit[];
++  }
++
++  const outsideOf = (commits: Commit[]) => {
++    const counts = new Map<string, number>();
++    for (const commit of commits) for (const name of commit.outside) counts.set(name, (counts.get(name) ?? 0) + 1);
++    return Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1]));
++  };
++
++  /// Every element marked as needing layout in the window (Chromium's LayoutInvalidationTracking: one
++  /// event per element whose layout a change dirtied, with the reason), by whether it lies in the
++  /// composer's form. A layout's root is the document whatever it lays out, so roots cannot say what
++  /// a key reflowed; the elements it dirtied can.
++  async function layoutDirtied(page: Page, run: () => Promise<unknown>) {
++    const cdp = await page.context().newCDPSession(page);
++    await browser.startTracing(page, {
++      categories: [
++        "devtools.timeline",
++        "disabled-by-default-devtools.timeline",
++        "disabled-by-default-devtools.timeline.invalidationTracking",
++      ],
++    });
++    await run();
++    const raw = JSON.parse((await browser.stopTracing()).toString()) as {
++      traceEvents: { name: string; ph: string; args?: any }[];
++    };
++    const ids: number[] = [];
++    const reasons = new Map<number, string>();
++    let layouts = 0;
++    let dirtyObjects = 0;
++    for (const event of raw.traceEvents) {
++      if (event.name === "Layout" && (event.ph === "B" || event.ph === "X")) {
++        layouts += 1;
++        dirtyObjects += Number(event.args?.beginData?.dirtyObjects ?? 0);
++      }
++      if (event.name !== "LayoutInvalidationTracking") continue;
++      const data = event.args?.data ?? {};
++      if (typeof data.nodeId !== "number") continue;
++      // A node the edit removed (the editor's old text node, its trailing break) is gone from the
++      // document by the time it is resolved, so it cannot be placed; its parent's own "Text changed"
++      // or "Added to layout" event says where the layout happened.
++      if (data.reason === "Removed from layout") continue;
++      ids.push(data.nodeId);
++      reasons.set(data.nodeId, String(data.reason ?? ""));
++    }
++    await cdp.send("DOM.getDocument", { depth: 0 });
++    const where = new Map<string, number>();
++    let outside = 0;
++    for (const backendNodeId of ids) {
++      let label = "unresolved";
++      let inside = false;
++      try {
++        const { object } = (await cdp.send("DOM.resolveNode", { backendNodeId })) as { object: { objectId: string } };
++        const { result } = (await cdp.send("Runtime.callFunctionOn", {
++          objectId: object.objectId,
++          returnByValue: true,
++          functionDeclaration: `function () {
++            const el = this.nodeType === 1 ? this : this.parentElement;
++            const form = document.querySelector("form.acpmux-composer");
++            const cls = el && typeof el.className === "string" ? el.className.split(/\\s+/).filter(Boolean).slice(0, 2) : [];
++            const label = el ? [el.tagName.toLowerCase(), ...cls].join(".") : String(this.nodeName);
++            return { inside: !!(form && el && form.contains(el)), label };
++          }`,
++        })) as { result: { value: { inside: boolean; label: string } } };
++        inside = result.value.inside;
++        label = result.value.label;
++      } catch {
++        // A node gone by now (a row shed): outside, named as unresolved.
++      }
++      if (!inside) outside += 1;
++      const key = `${inside ? "in" : "out"}:${label} (${reasons.get(backendNodeId) ?? ""})`;
++      where.set(key, (where.get(key) ?? 0) + 1);
++    }
++    await cdp.detach();
++    return { layouts, dirtyObjects, dirtied: ids.length, outside, where: Object.fromEntries(where) };
++  }
++
++  test("idle: a key commits nothing outside the composer and lays out nothing outside it", async () => {
++    const page = await openChat();
++    let commits: Commit[] = [];
++    const layout = await layoutDirtied(page, async () => {
++      commits = await typeKeys(page);
++    });
++    await page.close();
++    const inside = commits.reduce((total, commit) => total + commit.inside, 0);
++    const report = {
++      keys: KEYS,
++      commits: commits.length,
++      composer_renders: inside,
++      outside: outsideOf(commits),
++      layout,
++    };
++    console.log(`KEYSTROKE-ISOLATION idle ${JSON.stringify(report)}`);
++    // The hook saw the composer draw the keys: the watch works on this React.
++    expect(inside).toBeGreaterThanOrEqual(KEYS);
++    expect(report.outside).toEqual({});
++    expect({ layoutDirtiedOutsideComposer: layout.outside, where: layout.where }).toEqual({
++      layoutDirtiedOutsideComposer: 0,
++      where: Object.fromEntries(Object.entries(layout.where).filter(([key]) => key.startsWith("in:"))),
++    });
++  });
++
++  // A ratchet, not yet the rule: a line that grows the composer still renders the transcript once (its
++  // dock observer, VirtualTranscript.tsx `take`, flushSyncs the stack's height into React state so the
++  // room under the last row follows). Measured 2026-11-17: 3 lines, 2 transcript commits (TranscriptView,
++  // 2 rows, the minimaps, Jump to latest). The room moving out of React state is the transcript's
++  // piece (cmuxterm-hq handbook keystroke-renders-only-the-composer.md); until then the bound is one
++  // transcript commit per grown line, and a key that grows nothing renders nothing outside (idle above).
++  test("growth: a new line renders the transcript at most once, never more", async () => {
++    const page = await openChat();
++    const since = (await page.evaluate(() => performance.now())) as number;
++    const box = async () =>
++      (await page.evaluate(
++        () => document.querySelector("form.acpmux-composer")?.getBoundingClientRect().height ?? 0,
++      )) as number;
++    const before = await box();
++    let layout: Awaited<ReturnType<typeof layoutDirtied>> | undefined;
++    layout = await layoutDirtied(page, async () => {
++      for (let line = 0; line < 3; line += 1) {
++        await page.keyboard.press("x");
++        await page.keyboard.press("Shift+Enter");
++        await page.waitForTimeout(400);
++      }
++      await page.waitForTimeout(1_500);
++      await settled(page);
++    });
++    const after = await box();
++    const commits = (await page.evaluate(
++      (from) => ((window as any).__keystrokeCommits as Commit[]).filter((commit) => commit.at >= from),
++      since,
++    )) as Commit[];
++    await page.close();
++    const LINES = 3;
++    const report = {
++      grew_px: Math.round(after - before),
++      commits: commits.length,
++      commits_outside: commits.filter((commit) => commit.outside.length > 0).length,
++      outside: outsideOf(commits),
++      layout,
++    };
++    console.log(`KEYSTROKE-ISOLATION growth ${JSON.stringify(report)}`);
++    // The box grew: the lines took.
++    expect(after - before).toBeGreaterThan(10);
++    expect(report.commits_outside).toBeLessThanOrEqual(LINES);
++    // Only the transcript takes the room: not the pane root, the header or the sidebar.
++    expect(report.outside.AcpmuxPane ?? 0).toBe(0);
++    expect((report.outside.TranscriptView ?? 0) <= LINES).toBe(true);
++  });
++
++  test("streaming: typing renders nothing outside the composer that the stream alone does not", async () => {
++    const page = await openChat();
++    // The stream alone first: what it renders outside the composer with nobody typing.
++    const controlFrom = (await page.evaluate(() => performance.now())) as number;
++    const control = (await page.evaluate(() =>
++      (window as any).cmuxAcpmuxDebug.loadRun({ seconds: 3, chunk_ms: 16, tool_every: 30, scroll_speed: 0 }),
++    )) as Record<string, any>;
++    const controlCommits = (await page.evaluate(
++      (from) => ((window as any).__keystrokeCommits as Commit[]).filter((commit) => commit.at >= from),
++      controlFrom,
++    )) as Commit[];
++    const streamed = new Set(controlCommits.flatMap((commit) => commit.outside));
++    const streaming = page.evaluate(() =>
++      (window as any).cmuxAcpmuxDebug.loadRun({ seconds: 6, chunk_ms: 16, tool_every: 30, scroll_speed: 0 }),
++    );
++    await page.waitForTimeout(400);
++    const commits = await typeKeys(page);
++    const run = (await streaming) as Record<string, any>;
++    await page.close();
++    const all = outsideOf(commits);
++    const report = {
++      keys: KEYS,
++      deltas: run.deltas,
++      control_deltas: control.deltas,
++      commits: commits.length,
++      composer_renders: commits.reduce((total, commit) => total + commit.inside, 0),
++      // A commit that drew the composer and something else: the key's render rode one batch with
++      // other work (a stream update), so the letter waited for that work.
++      composer_commits_shared: commits.filter((commit) => commit.inside > 0 && commit.outside.length > 0).length,
++      outside_typing_adds: Object.fromEntries(Object.entries(all).filter(([name]) => !streamed.has(name))),
++      outside_all: all,
++      stream_alone_outside: outsideOf(controlCommits),
++    };
++    console.log(`KEYSTROKE-ISOLATION stream ${JSON.stringify(report)}`);
++    expect(run.deltas).toBeGreaterThan(50);
++    expect(report.composer_renders).toBeGreaterThanOrEqual(KEYS);
++    expect(report.outside_typing_adds).toEqual({});
++  });
++});
+diff --git a/webviews/test/composer-keystroke-renders-browser.test.ts b/webviews/test/composer-keystroke-renders-browser.test.ts
+index 1452f98412f..1753e4a734a 100644
+--- a/webviews/test/composer-keystroke-renders-browser.test.ts
++++ b/webviews/test/composer-keystroke-renders-browser.test.ts
+@@ -108,6 +108,7 @@ await requireBrowserLane("composer-keystroke-renders-browser.test.ts", async ()
+       rows: counted("row:") + counted("content:") + counted("frame:"),
+       model: renders["composer:model"] ?? 0,
+       plus: renders["composer:plus"] ?? 0,
+-    }).toEqual({ transcript: 0, rows: 0, model: 0, plus: 0 });
++      queue: renders["composer:queue"] ?? 0,
++    }).toEqual({ transcript: 0, rows: 0, model: 0, plus: 0, queue: 0 });
+   });
+ });
