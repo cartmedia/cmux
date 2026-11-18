@@ -131,6 +131,8 @@ Environment:
   CMUX_CUA_SRC          existing cmux-cua checkout to read instead of cloning/fetching
   CMUX_CUA_CACHE_DIR    default cache dir override
   CMUX_CUA_REPO_URL     repo URL override, defaults to manaflow-ai/cmux-cua
+  CMUX_CUA_SOURCE_BUNDLE git bundle holding the pinned commit; an empty cache
+                         clones from it instead of from CMUX_CUA_REPO_URL
 USAGE
 }
 
@@ -376,7 +378,19 @@ else
       exit 1
     fi
     TMPDIR_CLONE="$(mktemp -d "$CACHE_DIR/.cmux-cua-clone.XXXXXX")"
-    git clone "$CMUX_CUA_REPO_URL" "$TMPDIR_CLONE"
+    # CMUX_CUA_SOURCE_BUNDLE: a git bundle that holds the pinned commit (the nightly's
+    # cmux-cua-source.pin.json, from the controller store or R2), so an empty cache needs no clone
+    # over the internet. Its origin is still CMUX_CUA_REPO_URL; the SHA gate below checks the tree.
+    if [[ -n "${CMUX_CUA_SOURCE_BUNDLE:-}" ]] \
+      && git clone --quiet --no-checkout "$CMUX_CUA_SOURCE_BUNDLE" "$TMPDIR_CLONE" \
+      && git -C "$TMPDIR_CLONE" cat-file -e "$CMUX_CUA_PINNED_SHA^{commit}" 2>/dev/null; then
+      git -C "$TMPDIR_CLONE" remote set-url origin "$CMUX_CUA_REPO_URL"
+      echo "cmux-cua source seeded from $CMUX_CUA_SOURCE_BUNDLE"
+    else
+      [[ -n "${CMUX_CUA_SOURCE_BUNDLE:-}" ]] && echo "warning: $CMUX_CUA_SOURCE_BUNDLE does not hold $CMUX_CUA_PINNED_SHA; cloning" >&2
+      rm -rf "$TMPDIR_CLONE" && mkdir -p "$TMPDIR_CLONE"
+      git clone "$CMUX_CUA_REPO_URL" "$TMPDIR_CLONE"
+    fi
     printf '%s\n' "$CMUX_CUA_SOURCE_OWNER_VALUE" > "$TMPDIR_CLONE/$CMUX_CUA_SOURCE_OWNER_FILE"
     /bin/mv "$TMPDIR_CLONE" "$SRC_ROOT"
     TMPDIR_CLONE=""
