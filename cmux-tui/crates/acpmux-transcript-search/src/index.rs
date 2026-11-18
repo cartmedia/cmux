@@ -32,16 +32,17 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files(
   id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, harness TEXT NOT NULL, session TEXT NOT NULL,
   subagent INTEGER NOT NULL, dev INTEGER NOT NULL, ino INTEGER NOT NULL, offset INTEGER NOT NULL,
-  seq INTEGER NOT NULL, turn INTEGER NOT NULL, line INTEGER NOT NULL, guard BLOB NOT NULL);
+  seq INTEGER NOT NULL, turn INTEGER NOT NULL, line INTEGER NOT NULL, guard BLOB NOT NULL,
+  cwd TEXT);
 CREATE INDEX IF NOT EXISTS files_session ON files(session);
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
   text, role UNINDEXED, at UNINDEXED, turn UNINDEXED, line UNINDEXED, message UNINDEXED,
   tokenize = 'trigram case_sensitive 0', detail = none);
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 ";
-/// The schema's `user_version`. An index of another one (version 1 kept no message ids) is
-/// emptied and every transcript read again.
-const VERSION: i64 = 2;
+/// The schema's `user_version`. An index of another one (version 1 kept no message ids, 2 no
+/// working directory) is emptied and every transcript read again.
+const VERSION: i64 = 3;
 
 /// A search orders, counts and windows at most this many matching docs exactly; past it, its page
 /// is read with bounded queries in its order and it has no total.
@@ -110,6 +111,16 @@ pub struct Query {
     pub window: Option<(i64, i64)>,
     /// Skips this many hits (in the order the hits come).
     pub offset: usize,
+    /// Only docs written before this time (ms since the epoch, not in).
+    pub before_ms: Option<i64>,
+    /// Text no matching doc may hold (as `text` is found).
+    pub exclude: Vec<String>,
+    /// Only transcripts this harness wrote.
+    pub harness: Option<Harness>,
+    /// Only transcripts whose working directory holds this (any case).
+    pub folder: Option<String>,
+    /// `text`, `also` and `exclude` match as written, letter case too.
+    pub case_sensitive: bool,
 }
 
 impl Query {
@@ -125,6 +136,11 @@ impl Query {
             order: Order::Newest,
             window: None,
             offset: 0,
+            before_ms: None,
+            exclude: Vec::new(),
+            harness: None,
+            folder: None,
+            case_sensitive: false,
         }
     }
 }
@@ -207,6 +223,7 @@ struct FileRow {
     turn: u32,
     line: u64,
     guard: Vec<u8>,
+    cwd: Option<String>,
 }
 
 impl Index {
@@ -275,7 +292,7 @@ impl Index {
         )?;
         let row = tx
             .query_row(
-                "SELECT id, dev, ino, offset, seq, turn, line, guard FROM files WHERE path = ?1",
+                "SELECT id, dev, ino, offset, seq, turn, line, guard, cwd FROM files WHERE path = ?1",
                 params![path],
                 |r| {
                     Ok(FileRow {
@@ -287,6 +304,7 @@ impl Index {
                         turn: r.get::<_, i64>(5)? as u32,
                         line: r.get::<_, i64>(6)? as u64,
                         guard: r.get(7)?,
+                        cwd: r.get(8)?,
                     })
                 },
             )
@@ -309,6 +327,7 @@ impl Index {
                     turn: 0,
                     line: 0,
                     guard: Vec::new(),
+                    cwd: None,
                 }
             }
         };
@@ -355,6 +374,9 @@ impl Index {
                 }
                 row.line += 1;
                 let parsed = parse::line(source.harness, raw, &mut state);
+                if parsed.cwd.is_some() && parsed.cwd != row.cwd {
+                    row.cwd = parsed.cwd;
+                }
                 for doc in parsed.docs {
                     row.seq += 1;
                     if row.seq >= 1 << 32 {
@@ -393,11 +415,14 @@ impl Index {
     /// rest, each part in `q.order`; `q.offset` of them skipped, then at most `q.limit`. Reads the
     /// text of the page's docs only.
     pub fn page(&self, q: &Query) -> Result<Page> {
-        let Some(words) = Words::of(q) else { return Ok(Page::default()) };
+        let Some(mut words) = Words::of(q) else { return Ok(Page::default()) };
         if q.limit == 0 {
             return Ok(Page::default());
         }
-        let files = self.files(q.sessions.as_deref())?;
+        let mut files = self.files(q.sessions.as_deref())?;
+        if !words.only_files(q, &mut files, q.sessions.is_none()) {
+            return Ok(Page { hits: Vec::new(), total: Some(0) });
+        }
         let scope = match &q.sessions {
             None => None,
             // A session's files in path order (as text: `<id>.jsonl` before `<id>/subagents/`):
@@ -446,7 +471,7 @@ impl Index {
         };
         let mut hits = Vec::with_capacity(q.limit.min(rows.len()));
         for (rowid, _, inside) in rows.into_iter().skip(q.offset).take(q.limit) {
-            if let Some(hit) = self.hit(rowid, &files, &words.first, q.context, inside)? {
+            if let Some(hit) = self.hit(rowid, &files, &words, q.context, inside)? {
                 hits.push(hit);
             }
         }
@@ -462,9 +487,25 @@ impl Index {
         let Some((first, rest)) = words.split_first() else { return Ok(Vec::new()) };
         let mut q = Query::new(first.clone());
         q.also = rest.to_vec();
-        let Some(words) = Words::of(&q) else { return Ok(Vec::new()) };
-        let files = self.files(None)?;
-        let listed = self.matching(&words, None, " AND role < 2", Some("rowid DESC"), scan)?;
+        self.chats_matching(&q, scan, context)
+    }
+
+    /// [`Self::chats`] for a whole query: its text, `also`, `exclude`, role (none: prompts and
+    /// replies), harness, folder, `since_ms`, `before_ms` and case (`sessions`, `order`,
+    /// `window`, `limit` and `offset` are not read).
+    pub fn chats_matching(
+        &self,
+        q: &Query,
+        scan: usize,
+        context: usize,
+    ) -> Result<Vec<(Hit, u32)>> {
+        let Some(mut words) = Words::of(q) else { return Ok(Vec::new()) };
+        let mut files = self.files(None)?;
+        if !words.only_files(q, &mut files, true) {
+            return Ok(Vec::new());
+        }
+        let role = if q.role.is_some() { "" } else { " AND role < 2" };
+        let listed = self.matching(&words, None, role, Some("rowid DESC"), scan)?;
         let mut newest: HashMap<&str, (Option<i64>, i64, u32)> = HashMap::new();
         for (rowid, at) in listed {
             let Some(file) = files.get(&(rowid >> 32)).filter(|f| !f.subagent) else { continue };
@@ -478,7 +519,7 @@ impl Index {
         best.sort_by_key(|b| std::cmp::Reverse((b.0, b.1)));
         let mut out = Vec::with_capacity(best.len());
         for (_, rowid, count) in best {
-            if let Some(hit) = self.hit(rowid, &files, &words.first, context, false)? {
+            if let Some(hit) = self.hit(rowid, &files, &words, context, false)? {
                 out.push((hit, count));
             }
         }
@@ -574,12 +615,12 @@ impl Index {
         }
     }
 
-    /// Doc `rowid` as a hit for `lower` (the query's first text, ASCII-lowercased).
+    /// Doc `rowid` as a hit for `words.first` (the query's first text).
     fn hit(
         &self,
         rowid: i64,
         files: &HashMap<i64, FileInfo>,
-        lower: &str,
+        words: &Words,
         context: usize,
         in_window: bool,
     ) -> Result<Option<Hit>> {
@@ -600,11 +641,8 @@ impl Index {
             })
             .optional()?;
         let Some((at, role, turn, line, text, message)) = row else { return Ok(None) };
-        let (snippet, start, len, before, after) = snippet(&text, lower, context);
-        let matches =
-            memchr::memmem::find_iter(text.to_ascii_lowercase().as_bytes(), lower.as_bytes())
-                .count()
-                .max(1);
+        let (snippet, start, len, before, after, matches) =
+            snippet(&text, &words.first, words.case_sensitive, context);
         Ok(Some(Hit {
             session: file.session.clone(),
             harness: file.harness,
@@ -643,11 +681,12 @@ impl Index {
                     harness: Harness::parse(&harness).unwrap_or(Harness::Claude),
                     session: r.get(3)?,
                     subagent: r.get(4)?,
+                    cwd: r.get(5)?,
                 },
             );
             Ok(())
         };
-        let sql = "SELECT id, path, harness, session, subagent FROM files";
+        let sql = "SELECT id, path, harness, session, subagent, cwd FROM files";
         match sessions {
             None => {
                 let mut stmt = self.conn.prepare_cached(sql)?;
@@ -675,12 +714,24 @@ struct FileInfo {
     harness: Harness,
     session: String,
     subagent: bool,
+    /// The session's working directory, when its transcript named one.
+    cwd: Option<String>,
+}
+
+impl FileInfo {
+    /// Whether `q`'s harness and folder filters keep this transcript.
+    fn kept(&self, q: &Query, folder: Option<&str>) -> bool {
+        q.harness.is_none_or(|h| h == self.harness)
+            && folder.is_none_or(|f| {
+                self.cwd.as_deref().is_some_and(|cwd| cwd.to_lowercase().contains(f))
+            })
+    }
 }
 
 fn save(tx: &rusqlite::Transaction<'_>, row: &FileRow) -> Result<()> {
     tx.execute(
-        "UPDATE files SET dev = ?2, ino = ?3, offset = ?4, seq = ?5, turn = ?6, line = ?7, guard = ?8
-         WHERE id = ?1",
+        "UPDATE files SET dev = ?2, ino = ?3, offset = ?4, seq = ?5, turn = ?6, line = ?7, guard = ?8,
+         cwd = ?9 WHERE id = ?1",
         params![
             row.id,
             row.dev,
@@ -689,7 +740,8 @@ fn save(tx: &rusqlite::Transaction<'_>, row: &FileRow) -> Result<()> {
             row.seq,
             i64::from(row.turn),
             row.line as i64,
-            row.guard
+            row.guard,
+            row.cwd
         ],
     )?;
     Ok(())
@@ -720,12 +772,26 @@ fn file_id(_meta: &std::fs::Metadata) -> (i64, i64) {
     (0, 0)
 }
 
-/// The match in `text` and about `context` bytes each side (cut at character boundaries), where
-/// the match is in it, and whether text was left out before and after.
-fn snippet(text: &str, lower: &str, context: usize) -> (String, usize, usize, bool, bool) {
-    let folded = text.to_ascii_lowercase();
-    let (at, len) = memchr::memmem::find(folded.as_bytes(), lower.as_bytes())
-        .map_or((0, 0), |at| (at, lower.len()));
+/// The match of `first` in `text` (as written with `case_sensitive`, else `first` is
+/// ASCII-lowercased and so is the text it is found in) and about `context` bytes each side (cut at
+/// character boundaries), where the match is in it, whether text was left out before and after,
+/// and how many times `text` holds `first` (at least 1).
+fn snippet(
+    text: &str,
+    first: &str,
+    case_sensitive: bool,
+    context: usize,
+) -> (String, usize, usize, bool, bool, usize) {
+    let folded;
+    let hay = if case_sensitive {
+        text
+    } else {
+        folded = text.to_ascii_lowercase();
+        &folded
+    };
+    let finder = memchr::memmem::Finder::new(first.as_bytes());
+    let (at, len) = finder.find(hay.as_bytes()).map_or((0, 0), |at| (at, first.len()));
+    let matches = finder.find_iter(hay.as_bytes()).count().max(1);
     let mut start = at.saturating_sub(context);
     while !text.is_char_boundary(start) {
         start -= 1;
@@ -740,6 +806,7 @@ fn snippet(text: &str, lower: &str, context: usize) -> (String, usize, usize, bo
         len,
         start > 0,
         end < text.len(),
+        matches,
     )
 }
 
@@ -749,10 +816,18 @@ fn within(window: Option<(i64, i64)>, at: Option<i64>) -> bool {
 }
 
 /// What a doc must hold, as SQL: each text as a `LIKE` (which the trigram index serves), and the
-/// query's role and time filters.
+/// query's exclusions, role and time filters.
+///
+/// Every term is its own `LIKE`, so FTS5 reads the posting lists of each one's trigrams and
+/// intersects them: a term under 3 characters gives no trigram and is checked row by row on what
+/// the other terms matched (no worse than before), and a query of short terms alone reads every doc
+/// (as a short query did before). An exclusion (`NOT LIKE`, `instr(..) = 0`) and a case-sensitive
+/// check (`instr(text, ?) > 0`, which minds case) are row checks on the docs the `LIKE`s matched.
 struct Words {
-    /// The first text, ASCII-lowercased: a hit's snippet is cut around it.
+    /// The first text (ASCII-lowercased unless `case_sensitive`): a hit's snippet is cut around
+    /// it.
     first: String,
+    case_sensitive: bool,
     /// The conditions, `?` for each of `args` in order.
     sql: String,
     args: Vec<rusqlite::types::Value>,
@@ -765,8 +840,13 @@ impl Words {
         if first.is_empty() {
             return None;
         }
-        let mut words =
-            Self { first: first.to_ascii_lowercase(), sql: String::new(), args: Vec::new() };
+        let case = q.case_sensitive;
+        let mut words = Self {
+            first: if case { first.to_owned() } else { first.to_ascii_lowercase() },
+            case_sensitive: case,
+            sql: String::new(),
+            args: Vec::new(),
+        };
         let texts =
             std::iter::once(first).chain(q.also.iter().map(|w| w.trim()).filter(|w| !w.is_empty()));
         for (i, text) in texts.enumerate() {
@@ -777,9 +857,26 @@ impl Words {
             words.args.push(format!("%{text}%").into());
             // No ESCAPE (FTS5 serves an escaped pattern with no index): a `%` or `_` is a wildcard
             // in the LIKE, so the text itself is checked too.
-            if text.contains(['%', '_']) {
+            if case {
+                // The LIKE (any case) narrows to the trigram matches; this keeps the exact ones.
+                words.sql.push_str(" AND instr(text, ?) > 0");
+                words.args.push(text.to_owned().into());
+            } else if text.contains(['%', '_']) {
                 words.sql.push_str(" AND instr(lower(text), ?) > 0");
                 words.args.push(text.to_ascii_lowercase().into());
+            }
+        }
+        for text in q.exclude.iter().map(|w| w.trim()).filter(|w| !w.is_empty()) {
+            if case {
+                words.sql.push_str(" AND instr(text, ?) = 0");
+                words.args.push(text.to_owned().into());
+            } else if text.contains(['%', '_']) {
+                // A wildcard would drop docs that do not hold the text itself.
+                words.sql.push_str(" AND instr(lower(text), ?) = 0");
+                words.args.push(text.to_ascii_lowercase().into());
+            } else {
+                words.sql.push_str(" AND text NOT LIKE ?");
+                words.args.push(format!("%{text}%").into());
             }
         }
         if let Some(role) = q.role {
@@ -788,6 +885,30 @@ impl Words {
         if let Some(since) = q.since_ms {
             words.sql.push_str(&format!(" AND at >= {since}"));
         }
+        if let Some(before) = q.before_ms {
+            words.sql.push_str(&format!(" AND at < {before}"));
+        }
         Some(words)
+    }
+
+    /// Keeps only the transcripts of `files` that `q`'s harness and folder filters pass and, with
+    /// `in_sql` (the search reads every transcript, not one rowid range each), has the SQL keep
+    /// only their docs. False when none is left.
+    fn only_files(&mut self, q: &Query, files: &mut HashMap<i64, FileInfo>, in_sql: bool) -> bool {
+        if q.harness.is_none() && q.folder.is_none() {
+            return true;
+        }
+        let folder = q.folder.as_deref().map(str::trim).map(str::to_lowercase);
+        files.retain(|_, f| f.kept(q, folder.as_deref()));
+        if files.is_empty() {
+            return false;
+        }
+        if in_sql {
+            let mut ids: Vec<i64> = files.keys().copied().collect();
+            ids.sort_unstable();
+            let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+            self.sql.push_str(&format!(" AND (rowid >> 32) IN ({list})"));
+        }
+        true
     }
 }
