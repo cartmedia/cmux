@@ -7,14 +7,19 @@ extension AgentChatsPalettePage {
     /// row opens through the app's Open Chat path. This chat searches the agent chat the active
     /// window's focused pane shows, and acpmux completes the field's search operators.
     init(services: AppServices) {
-        let socket = services.chatsFeed?.socketPath
-        let syntax: (@MainActor (String, Int) async -> AcpmuxSearchSyntaxAnswer?)? = socket.map { socket in
-            { query, cursor in await AcpmuxSearchCalls.searchSyntax(socketPath: socket, query: query, cursor: cursor) }
+        var syntax: (@MainActor (String, Int) async -> AcpmuxSearchSyntaxAnswer?)?
+        if let socket = services.chatsFeed?.socketPath {
+            syntax = { @MainActor (query: String, cursor: Int) async -> AcpmuxSearchSyntaxAnswer? in
+                await AcpmuxSearchCalls.searchSyntax(socketPath: socket, query: query, cursor: cursor)
+            }
         }
         self.init(windows: services.chatsFeed?.windows,
                   history: { [weak services] query in await services?.palette.model.rankerHistory(keyPrefix: "chat:", query: query) },
                   open: { [weak services] key, reveal in services?.chatsOpener.open(key, reveal: reveal) },
-                  focusedChat: { [weak services] in services.flatMap(Self.focusedChat) },
+                  focusedChat: { [weak services] () -> AgentChatsFocusedChat? in
+                      guard let services else { return nil }
+                      return Self.focusedChat(services)
+                  },
                   syntax: syntax)
     }
 
