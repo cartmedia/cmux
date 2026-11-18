@@ -36,8 +36,8 @@ and LINUX_RUNNER and CI_TRUSTED_RUNNER take another Blacksmith Linux size
 (LINUX_FAILOVER, TRUSTED_FAILOVER), never GitHub-hosted Ubuntu: hosted
 Ubuntu sits behind the plan's concurrency limit, and on 2026-10-27 the
 switch's own failover filled it so this workflow's watch waited 94 minutes
-for a runner (Leo: "just put it on blacksmith / 16vcpu blacksmiths do
-exist"). CI_CLOUD_FAILOVER (JSON,
+for a runner. The failover is the 2 vCPU size, not a bigger one: Blacksmith
+caps vCPUs at once, so a bigger size asks for more of what has run out. CI_CLOUD_FAILOVER (JSON,
 variable name to value, "" to leave one alone) overrides any of them. Only a
 variable that is unset (its readers then fall back to Blacksmith) or holds a
 blacksmith-* label is changed, so a lane someone deliberately pointed
@@ -94,17 +94,17 @@ CLOUD_PREFIX = pr_runner_pool.EPHEMERAL_PREFIX  # "blacksmith-"
 # serves. A single probed label is a pin: on 2026-10-28 the 4 vCPU label
 # alone queued past 5 minutes at 21:59Z, 22:13Z, 22:53Z and 23:30Z while the
 # other sizes started jobs, and each time the whole fleet failed over.
-PROBE_LABELS = ("blacksmith-4vcpu-ubuntu-2404", "blacksmith-16vcpu-ubuntu-2404")
+PROBE_LABELS = ("blacksmith-4vcpu-ubuntu-2404", "blacksmith-2vcpu-ubuntu-2404")
 # Where Linux overflow goes while the probed label stalls: another Blacksmith
-# Linux size, never GitHub-hosted Ubuntu. CI_TRUSTED_RUNNER's readers accept
-# only ubuntu-24.04 and the 2 and 4 vCPU labels (docs/ci-runners.md), so it
-# takes 2 vCPU.
-LINUX_FAILOVER = "blacksmith-16vcpu-ubuntu-2404"
+# Linux size, never GitHub-hosted Ubuntu, and never a bigger one: Blacksmith caps
+# the organization's vCPUs at once, and on 2026-11-18 32 vCPU started 1 of 282
+# jobs from 00:00 to 00:48Z. CI_TRUSTED_RUNNER's readers accept only the 2, 4
+# and (some) 8 vCPU labels, so both take 2 vCPU.
+LINUX_FAILOVER = "blacksmith-2vcpu-ubuntu-2404"
 TRUSTED_FAILOVER = "blacksmith-2vcpu-ubuntu-2404"
 # When the probed label is that failover itself, the other size: a probed one, so
 # toward_started() can pick it, and one the bounded LINUX_RUNNER selectors accept.
-ALTERNATE_FAILOVERS = {LINUX_FAILOVER: "blacksmith-4vcpu-ubuntu-2404",
-                       TRUSTED_FAILOVER: "blacksmith-4vcpu-ubuntu-2404"}
+ALTERNATE_FAILOVERS = {LINUX_FAILOVER: "blacksmith-4vcpu-ubuntu-2404"}
 # The only Blacksmith labels CI_TRUSTED_RUNNER's readers accept.
 TRUSTED_BLACKSMITH_LABELS = frozenset({"blacksmith-2vcpu-ubuntu-2404", "blacksmith-4vcpu-ubuntu-2404"})
 HOSTED_LINUX_LABEL = re.compile(r"^ubuntu-")

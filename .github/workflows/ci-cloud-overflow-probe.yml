@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        label: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.probe_label != '' && format('["{0}"]', inputs.probe_label) || '["blacksmith-4vcpu-ubuntu-2404", "blacksmith-16vcpu-ubuntu-2404"]') }}
+        label: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.probe_label != '' && format('["{0}"]', inputs.probe_label) || '["blacksmith-4vcpu-ubuntu-2404", "blacksmith-2vcpu-ubuntu-2404"]') }}
     runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || matrix.label }}
     timeout-minutes: 2
     permissions: {}
@@ -82,18 +82,18 @@ jobs:
     if: github.repository_owner == 'manaflow-ai'
     # Its own bounded selector over CI_TRUSTED_RUNNER, the variable the other
     # GLAEDA_ROUTE_APP_KEY control jobs read (ci-owned-pool-rescue, ci-stale-run-janitor).
-    # The expression bounds the value to one-job Blacksmith Linux VMs (2 or 8 vCPU), so no
+    # The expression bounds the value to a one-job Blacksmith Linux VM (8 vCPU), so no
     # variable can move this App key to a reused machine. Unlike the shared trusted selector it
-    # never resolves to a size the probes ask for (PROBE_LABELS, 4 and 16 vCPU) or to GitHub-
-    # hosted Ubuntu: any other value, unset included (the switch's restore can unset it, and
-    # its alternate failover is 4 vCPU), takes Blacksmith 2 vCPU. So a stalled probe size never holds the watch, and with it the
+    # never resolves to a size the probes ask for (PROBE_LABELS, 4 and 2 vCPU, the linux pool) or
+    # to GitHub-hosted Ubuntu: any other value, unset included (the switch's restore can unset it,
+    # and its failovers are 2 and 4 vCPU), takes Blacksmith 8 vCPU. So a stalled probe size never holds the watch, and with it the
     # concurrency group, as on 2026-10-28 (tests/test_ci_cloud_overflow_switch.py).
     # It used to name the literal blacksmith-6vcpu-macos-26, a single-label pin with no
     # fallback: on 2026-11-03 RUNNER_POOLS marked that label dead and run 41688532704's
     # watch queued 19 minutes (17:53Z-18:12Z), so the hosted light rescue below ran about
     # every 20-25 minutes instead of every pass (cmuxterm-hq#6671). It needs no macOS
     # (Python and gh only).
-    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('["blacksmith-2vcpu-ubuntu-2404","blacksmith-8vcpu-ubuntu-2404"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-2vcpu-ubuntu-2404' }} # ephemeral-required: holds the App key that writes runner variables; never a probed size
+    runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('["blacksmith-8vcpu-ubuntu-2404"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-8vcpu-ubuntu-2404' }} # ephemeral-required: holds the App key that writes runner variables; never a probed size
     timeout-minutes: 25
     permissions:
       actions: write
