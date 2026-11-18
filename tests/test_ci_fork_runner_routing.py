@@ -111,7 +111,7 @@ HOSTED_LITERAL_RUNNER = re.compile(
 # other value, including a persistent mini's label, falls back to Blacksmith,
 # and a fork running its own CI gets GitHub-hosted. Either provider can then
 # carry the merge-gating checks while the other is down.
-TRUSTED_RUNNER_LABELS = ("ubuntu-24.04", "blacksmith-2vcpu-ubuntu-2404", "blacksmith-4vcpu-ubuntu-2404", "blacksmith-8vcpu-ubuntu-2404")
+TRUSTED_RUNNER_LABELS = ("blacksmith-2vcpu-ubuntu-2404", "blacksmith-4vcpu-ubuntu-2404", "blacksmith-8vcpu-ubuntu-2404")
 TRUSTED_RUNNER_EXPRESSION = (
     "${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('"
     + json.dumps(list(TRUSTED_RUNNER_LABELS), separators=(",", ":"))
@@ -121,11 +121,11 @@ TRUSTED_RUNNER_EXPRESSION = (
 # Keep that policy valid while other trusted jobs adopt the measured BS8 size.
 CLA_TRUSTED_RUNNER_EXPRESSION = TRUSTED_RUNNER_EXPRESSION.replace(',"blacksmith-8vcpu-ubuntu-2404"', '')
 TRUSTED_RUNNER_EXPRESSIONS = (TRUSTED_RUNNER_EXPRESSION, CLA_TRUSTED_RUNNER_EXPRESSION)
-# Fast checks admission accepts only the smallest measured Blacksmith size (a
-# picker's one re-run route, never 16 or 32 vCPU), with the same hosted
-# default. No input can select a persistent runner.
+# Fast checks admission accepts only the 8 vCPU Blacksmith size (a picker's
+# one re-run route, never 16 or 32 vCPU), else Blacksmith 2 vCPU (hosted Ubuntu
+# until 2026-11-18). No input can select a persistent runner.
 FAST_CHECKS_ADMISSION_EXPRESSION = (
-    "${{ contains(fromJSON('[\"blacksmith-8vcpu-ubuntu-2404\"]'), inputs.runner) && inputs.runner || 'ubuntu-24.04' }}"
+    "${{ contains(fromJSON('[\"blacksmith-8vcpu-ubuntu-2404\"]'), inputs.runner) && inputs.runner || 'blacksmith-2vcpu-ubuntu-2404' }}"
 )
 TRUSTED_RUNNER_LINE = re.compile(
     r"^\s*runs-on:\s*(?:" + "|".join(map(re.escape, TRUSTED_RUNNER_EXPRESSIONS)) + r")\s*(?:#.*)?$"
@@ -152,8 +152,8 @@ APP_KEY_MARKER = re.compile(r"create-github-app-token@|^\s*private-key:", re.MUL
 # when it names one of these Blacksmith Linux sizes (.github/runners.json), else 4 vCPU.
 # So a 4 vCPU stall can move these jobs (the overflow switch or a person sets LINUX_RUNNER),
 # and no value reaches a reused machine. The bound is in the expression, not the variable.
-BOUNDED_LINUX_LABELS = ("blacksmith-4vcpu-ubuntu-2404", "blacksmith-8vcpu-ubuntu-2404",
-                        "blacksmith-16vcpu-ubuntu-2404", "blacksmith-32vcpu-ubuntu-2404")
+BOUNDED_LINUX_LABELS = ("blacksmith-2vcpu-ubuntu-2404", "blacksmith-4vcpu-ubuntu-2404",
+                        "blacksmith-8vcpu-ubuntu-2404")
 BOUNDED_LINUX_SELECTOR = (
     "contains(fromJSON('" + json.dumps(list(BOUNDED_LINUX_LABELS), separators=(",", ":"))
     + "'), vars.LINUX_RUNNER) && vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404'"

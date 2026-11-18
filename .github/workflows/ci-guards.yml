@@ -202,6 +202,10 @@ jobs:
         if: ${{ matrix.group == 'ci' }}
         run: python3 tests/test_ci_runner_set.py
 
+      - name: Validate no route reaches GitHub-hosted or over-8 vCPU Linux without a reason
+        if: ${{ matrix.group == 'ci' }}
+        run: python3 tests/test_ci_routes_stay_off_hosted_and_small.py
+
       - name: Validate fast checks name the commit they test
         if: ${{ matrix.group == 'ci' }}
         run: python3 tests/test_ci_fast_checks_receipt.py

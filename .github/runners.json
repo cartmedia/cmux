@@ -55,10 +55,7 @@
   "default_fleet": "hosted",
 
   "hosted_light_jobs": {
-    "fast-checks.yml:admit": {
-      "runner": "ubuntu-24.04",
-      "why": "Read-only live runner admission; no source snapshot or arbitrary test command"
-    }
+    "$comment": ["No job takes GitHub-hosted Ubuntu any more (Leo, 2026-11-18: \"why are some things ONLY linux anyways if we can simply just do the linux parts on our machines\"); fast-checks.yml:admit was the last one and reads RUNNER_POOLS.linux_2. tests/test_ci_routes_stay_off_hosted_and_small.py keeps it so."]
   },
   "pools": {
     "$comment": [
@@ -71,10 +68,10 @@
       "Only a pool marked hosted may name a GitHub-hosted label, and it says why."
     ],
     "linux": {
-      "why": "Every Linux job: the runner set's Blacksmith sizes (Leo, 2026-10-28: \"just pin the set of the shit that isn't hilariously slow\"), smallest first. Blacksmith now caps us on vCPUs at once, so a 32 vCPU job holds the room of eight 4 vCPU jobs, and on 2026-10-31 the live member was 32 vCPU: 106,443 jobs and 193,021 billed minutes (about $12.4k of $19.3k) ran there, most of them checks under a minute (pr-perf-section-check 2,940 runs at 0.1 min). A stalled 4 vCPU moves the pool to 16 vCPU; 8 vCPU is not a member because the bounded selectors (vars.LINUX_RUNNER in 4/16/32, else 4) would send its readers back to 4 (Leo, 2026-11-01: \"we clearly are not able to use them. so we should have resized a long-ass time ago.\"). A job that needs more cores names its size, not this pool",
+      "why": "Every Linux job: the runner set's Blacksmith sizes (Leo, 2026-10-28: \"just pin the set of the shit that isn't hilariously slow\"). On 2026-10-31 the live member was 32 vCPU: 106,443 jobs and 193,021 billed minutes (about $12.4k of $19.3k) ran there, most of them checks under a minute (pr-perf-section-check 2,940 runs at 0.1 min). Blacksmith caps our organization's vCPUs at once, so a stall at a small size is usually that cap, and a bigger fallback asks for more of what is gone: on 2026-11-18 32 vCPU started 1 of 282 jobs from 00:00 to 00:48Z. A stalled size falls back to the same or a smaller one, so a stalled 4 vCPU moves the pool to 2 vCPU (Leo, 2026-11-18: \"why are some things ONLY linux anyways if we can simply just do the linux parts on our machines\"). A job that needs more cores names its size, not this pool",
       "members": [
         "blacksmith-4vcpu-ubuntu-2404",
-        "blacksmith-16vcpu-ubuntu-2404"
+        "blacksmith-2vcpu-ubuntu-2404"
       ]
     },
     "linux_2": {
@@ -85,28 +82,28 @@
       ]
     },
     "linux_4": {
-      "why": "Jobs measured at 4 vCPU that must stay on an ephemeral machine (secret-bearing and write-token jobs, which the linux pool may one day not be). A stalled 4 vCPU size moves them to 16 vCPU",
+      "why": "Jobs measured at 4 vCPU that must stay on an ephemeral machine (secret-bearing and write-token jobs, which the linux pool may one day not be). Blacksmith caps our organization's vCPUs at once, so a stall at a small size is usually that cap, and a bigger fallback asks for more of what is gone: on 2026-11-18 32 vCPU started 1 of 282 jobs from 00:00 to 00:48Z. A stalled size falls back to the same or a smaller one, so a stalled 4 vCPU moves them to 2 vCPU",
       "members": [
         "blacksmith-4vcpu-ubuntu-2404",
-        "blacksmith-16vcpu-ubuntu-2404"
+        "blacksmith-2vcpu-ubuntu-2404"
       ]
     },
     "linux_8": {
-      "why": "Jobs measured at 8 vCPU (tooling tests, mid-size compiles). A stalled 8 vCPU size moves them to 16 vCPU",
+      "why": "Jobs measured at 8 vCPU (tooling tests, mid-size compiles). Blacksmith caps our organization's vCPUs at once, so a stall at a small size is usually that cap, and a bigger fallback asks for more of what is gone: on 2026-11-18 32 vCPU started 1 of 282 jobs from 00:00 to 00:48Z. A stalled size falls back to the same or a smaller one, so a stalled 8 vCPU moves them to 4 vCPU",
       "members": [
         "blacksmith-8vcpu-ubuntu-2404",
-        "blacksmith-16vcpu-ubuntu-2404"
+        "blacksmith-4vcpu-ubuntu-2404"
       ]
     },
     "linux_16": {
-      "why": "CPU-bound jobs measured at 16 vCPU (compiles, linters, large suites). A stalled 16 vCPU size moves them to 32 vCPU",
+      "why": "CPU-bound jobs measured at 16 vCPU (compiles, linters, large suites; linux_sizes holds each job's measurement): each needs more than 8 vCPU. Blacksmith caps our organization's vCPUs at once, so a stall at a small size is usually that cap, and a bigger fallback asks for more of what is gone: on 2026-11-18 32 vCPU started 1 of 282 jobs from 00:00 to 00:48Z. A stalled size falls back to the same or a smaller one, so a stalled 16 vCPU moves them to 8 vCPU",
       "members": [
         "blacksmith-16vcpu-ubuntu-2404",
-        "blacksmith-32vcpu-ubuntu-2404"
+        "blacksmith-8vcpu-ubuntu-2404"
       ]
     },
     "linux_32": {
-      "why": "The largest parallel builds and test shards, measured at 32 vCPU (linux_sizes). A stalled 32 vCPU size moves them to 16 vCPU",
+      "why": "The largest parallel builds and test shards, measured at 32 vCPU (linux_sizes holds each job's why_32): each needs more than 8 vCPU. A stalled 32 vCPU size moves them to 16 vCPU",
       "members": [
         "blacksmith-32vcpu-ubuntu-2404",
         "blacksmith-16vcpu-ubuntu-2404"

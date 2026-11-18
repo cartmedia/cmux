@@ -68,7 +68,7 @@ check_cla_guard_runner() {
   # the same exact allowlist and is the authority; this keeps it visible.
   local hosted selector runs_on
   hosted="    runs-on: ubuntu-24.04"
-  selector="    runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"ubuntu-24.04\",\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}"
+  selector="    runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}"
   runs_on="$(grep -E '^    runs-on:' "$CLA_GUARD_FILE" || true)"
   if [[ "$runs_on" != "$hosted" && "$runs_on" != "$selector" ]]; then
     echo "FAIL: cla-policy-guard.yml must use ubuntu-24.04 or the CI_TRUSTED_RUNNER ephemeral selector"
@@ -1392,7 +1392,6 @@ PY_LIGHT
     # npm trusted publishing and --provenance accept only GitHub-hosted runners.
     "sdk-bootstrap-npm.yml:    runs-on: ubuntu-latest # github-hosted-required: npm provenance publishing"
     "sdk-release-cut.yml:    runs-on: ubuntu-latest # github-hosted-required: npm provenance needs a github-hosted runner"
-    "sdk-release-cut.yml:    runs-on: ubuntu-latest # github-hosted-required: npm provenance verification"
     "tui-publish-npm.yml:    runs-on: ubuntu-latest # github-hosted-required: npm provenance needs a github-hosted runner"
     "relay-publish-npm.yml:    runs-on: ubuntu-latest # github-hosted-required: npm provenance needs a github-hosted runner"
     "coderouter-publish-npm.yml:    runs-on: ubuntu-latest # github-hosted-required: npm provenance needs a GitHub-hosted runner"
@@ -1429,8 +1428,8 @@ PY_LIGHT
   done
   for probe in "runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}" \
                "runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'windows-2025' || 'blacksmith-4vcpu-windows-2025' }}" \
-               "runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"ubuntu-24.04\",\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}" \
-               "runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"ubuntu-24.04\",\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\",\"blacksmith-8vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}" \
+               "runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}" \
+               "runs-on: \${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\",\"blacksmith-8vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}" \
                '- blacksmith-6vcpu-macos-15' 'runs-on: blacksmith-4vcpu-ubuntu-2404-arm' '- warp-macos-15-arm64-6x'; do
     if printf '%s\n' "$probe" | sed -E "s/$fork_branch//g; s/$trusted_list//g" | grep -Eq "$hosted"; then
       echo "FAIL: GitHub-hosted runner guard self-test flagged an allowed runner: $probe"

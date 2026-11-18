@@ -128,7 +128,7 @@ CLA_ACTION = CLA_ACTION_FINAL
 # CLA checks while the other is down.
 CLA_RUNNER = "ubuntu-24.04".freeze
 CLA_BLACKSMITH_RUNNERS = %w[blacksmith-2vcpu-ubuntu-2404 blacksmith-4vcpu-ubuntu-2404].freeze
-CLA_TRUSTED_RUNNER_EXPRESSION = "${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"ubuntu-24.04\",\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}".freeze
+CLA_TRUSTED_RUNNER_EXPRESSION = "${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}".freeze
 CLA_RUNNERS = ([CLA_RUNNER] + CLA_BLACKSMITH_RUNNERS + [CLA_TRUSTED_RUNNER_EXPRESSION]).freeze
 # The original runner identity guard admits only GitHub-hosted runners. It
 # stays valid so workflows main carries keep passing until they move to the
@@ -2579,7 +2579,7 @@ def run_runner_regression_matrix!
     "ubuntu-24.04",
     "blacksmith-2vcpu-ubuntu-2404",
     "blacksmith-4vcpu-ubuntu-2404",
-    "${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"ubuntu-24.04\",\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}"
+    "${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}"
   ]
   fail!("CLA runner allowlist regression failed") unless accepted_runners == CLA_RUNNERS
   cla_jobs.product(accepted_runners).each do |job_name, runner|

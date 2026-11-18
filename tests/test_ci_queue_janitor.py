@@ -850,7 +850,7 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("  sweep:\n    permissions:\n      actions: write\n      pull-requests: read\n      contents: read\n", text)
         # It mints GLAEDA_ROUTE_APP_KEY and CMUX_BOT_APP_KEY: RUNNER_POOLS and LINUX_RUNNER move it only
         # among the Blacksmith Linux sizes the expression names (tests/test_ci_fork_runner_routing.py).
-        self.assertIn("runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"blacksmith-4vcpu-ubuntu-2404\",\"blacksmith-8vcpu-ubuntu-2404\",\"blacksmith-16vcpu-ubuntu-2404\",\"blacksmith-32vcpu-ubuntu-2404\"]'), fromJSON(vars.RUNNER_POOLS || '{}').linux) && fromJSON(vars.RUNNER_POOLS || '{}').linux || contains(fromJSON('[\"blacksmith-4vcpu-ubuntu-2404\",\"blacksmith-8vcpu-ubuntu-2404\",\"blacksmith-16vcpu-ubuntu-2404\",\"blacksmith-32vcpu-ubuntu-2404\"]'), vars.LINUX_RUNNER) && vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}", text)
+        self.assertIn("runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('[\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\",\"blacksmith-8vcpu-ubuntu-2404\"]'), fromJSON(vars.RUNNER_POOLS || '{}').linux) && fromJSON(vars.RUNNER_POOLS || '{}').linux || contains(fromJSON('[\"blacksmith-2vcpu-ubuntu-2404\",\"blacksmith-4vcpu-ubuntu-2404\",\"blacksmith-8vcpu-ubuntu-2404\"]'), vars.LINUX_RUNNER) && vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}", text)
         self.assertIn("concurrency:\n  group: ${{ (github.event_name == 'workflow_run'", text)
         self.assertIn("vars.CI_JANITOR_QUEUE_THRESHOLD", text)
         self.assertIn("ORPHAN_MINUTES: ${{ vars.CI_JANITOR_ORPHAN_MINUTES }}", text)
@@ -949,11 +949,11 @@ class SweepRunnerTests(unittest.TestCase):
         return str(value(tree))
 
     def test_a_stalled_linux_runner_size_does_not_hold_the_sweep(self):
-        # The pool moved to 16 vCPU while the legacy mirror stayed stale at 32 vCPU.
+        # The pool moved to 2 vCPU while the legacy mirror stayed stale at 32 vCPU.
         frozen = {"LINUX_RUNNER": "blacksmith-32vcpu-ubuntu-2404",
-                  "RUNNER_POOLS": json.dumps({"linux": "blacksmith-16vcpu-ubuntu-2404",
+                  "RUNNER_POOLS": json.dumps({"linux": "blacksmith-2vcpu-ubuntu-2404",
                                               "_dead": {"blacksmith-32vcpu-ubuntu-2404": "2026-11-01T05:30:00Z"}})}
-        self.assertEqual(self.runner(frozen), "blacksmith-16vcpu-ubuntu-2404")
+        self.assertEqual(self.runner(frozen), "blacksmith-2vcpu-ubuntu-2404")
 
     def test_eight_vcpu_pool_member_wins_over_stale_linux_runner(self):
         frozen = {"LINUX_RUNNER": "blacksmith-32vcpu-ubuntu-2404",
@@ -961,7 +961,9 @@ class SweepRunnerTests(unittest.TestCase):
         self.assertEqual(self.runner(frozen), "blacksmith-8vcpu-ubuntu-2404")
 
     def test_falls_back_to_linux_runner_then_four_vcpu(self):
-        self.assertEqual(self.runner({"LINUX_RUNNER": "blacksmith-32vcpu-ubuntu-2404"}), "blacksmith-32vcpu-ubuntu-2404")
+        self.assertEqual(self.runner({"LINUX_RUNNER": "blacksmith-2vcpu-ubuntu-2404"}), "blacksmith-2vcpu-ubuntu-2404")
+        # Over 8 vCPU is no route of the sweep's (Blacksmith caps vCPUs at once; 2026-11-18).
+        self.assertEqual(self.runner({"LINUX_RUNNER": "blacksmith-32vcpu-ubuntu-2404"}), "blacksmith-4vcpu-ubuntu-2404")
         self.assertEqual(self.runner({"RUNNER_POOLS": json.dumps({"linux": "glaeda-std-xcode-26.6"}),
                                       "LINUX_RUNNER": "cmux-lawrence"}), "blacksmith-4vcpu-ubuntu-2404")
         self.assertEqual(self.runner({}), "blacksmith-4vcpu-ubuntu-2404")

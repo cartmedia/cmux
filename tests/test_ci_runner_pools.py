@@ -53,9 +53,9 @@ class Declared(unittest.TestCase):
 
     def test_the_linux_pool_is_the_runner_set(self) -> None:
         # Leo, 2026-10-28: "just pin the set of the shit that isn't hilariously slow".
-        # Smallest first: Blacksmith caps vCPUs at once, so the live member is the small size (2026-11-01).
+        # Small first, falling back smaller: Blacksmith caps vCPUs at once (2026-11-01, 2026-11-18).
         self.assertEqual(runner_pools.load_pools()["linux"]["members"],
-                         ["blacksmith-4vcpu-ubuntu-2404", "blacksmith-16vcpu-ubuntu-2404"])
+                         ["blacksmith-4vcpu-ubuntu-2404", "blacksmith-2vcpu-ubuntu-2404"])
 
     def test_every_blacksmith_linux_size_has_its_own_pool(self) -> None:
         # Leo, 2026-10-28: "Where the f***ing are the generalized solution to all these problems that these
@@ -486,16 +486,16 @@ class Main(unittest.TestCase):
 
     def test_a_stalled_size_flips_linux_once(self) -> None:
         switch = self.Switch({runner_pools.HEALTH_VARIABLE: json.dumps(health({
-            "blacksmith-4vcpu-ubuntu-2404": "stalled", "blacksmith-16vcpu-ubuntu-2404": "started"})),
+            "blacksmith-4vcpu-ubuntu-2404": "stalled", "blacksmith-2vcpu-ubuntu-2404": "started"})),
             "LINUX_RUNNER": "blacksmith-4vcpu-ubuntu-2404"})
         with tempfile.TemporaryDirectory() as tmp:
             env = {"RUNNER_POOLS": "", "GITHUB_STEP_SUMMARY": f"{tmp}/summary"}
             self.assertEqual(runner_pools.main([], env, api=self.Api(RECORDED), switch=switch, now=NOW), 0)
         [(name, raw), mirrored] = switch.writes
         self.assertEqual(name, "RUNNER_POOLS")
-        self.assertEqual(json.loads(raw)["linux"], "blacksmith-16vcpu-ubuntu-2404")
+        self.assertEqual(json.loads(raw)["linux"], "blacksmith-2vcpu-ubuntu-2404")
         # LINUX_RUNNER leaves the stalled size with the pool.
-        self.assertEqual(mirrored, ("LINUX_RUNNER", "blacksmith-16vcpu-ubuntu-2404"))
+        self.assertEqual(mirrored, ("LINUX_RUNNER", "blacksmith-2vcpu-ubuntu-2404"))
 
     def test_linux_runner_on_a_size_outside_the_set_follows_the_pool(self) -> None:
         # 2026-10-31: RUNNER_POOLS.linux was live but LINUX_RUNNER still named a size outside the pool
@@ -595,15 +595,16 @@ class Main(unittest.TestCase):
     def test_a_macos_only_overflow_record_does_not_freeze_linux_runner_on_a_dead_member(self) -> None:
         # 2026-11-01: the record (04:23Z) changed only macOS variables; RUNNER_POOLS marked 32 vCPU dead at
         # 05:30Z and moved linux to 16 vCPU, but LINUX_RUNNER stayed on 32 and its jobs queued there.
-        # The declared linux pool is now 4 then 16 vCPU (32 vCPU left it on 2026-11-01), so the dead member is 4.
+        # The declared linux pool is now 4 then 2 vCPU (32 vCPU left it on 2026-11-01, 16 on 2026-11-18), so the
+        # dead member is 4.
         current, _ = runner_pools.parse_value(json.dumps({"linux": "blacksmith-4vcpu-ubuntu-2404"}),
                                               runner_pools.load_pools())
         value, _ = runner_pools.reconcile(current, runner_pools.load_pools(),
                                           dead_now={"blacksmith-4vcpu-ubuntu-2404"}, served_now=(), now=NOW)
-        self.assertEqual(value["linux"], "blacksmith-16vcpu-ubuntu-2404")
+        self.assertEqual(value["linux"], "blacksmith-2vcpu-ubuntu-2404")
         live = {"LINUX_RUNNER": "blacksmith-4vcpu-ubuntu-2404"}
         self.assertEqual(runner_pools.mirror_writes(value, live, record=MACOS_ONLY_RECORD),
-                         [("LINUX_RUNNER", "blacksmith-16vcpu-ubuntu-2404")])
+                         [("LINUX_RUNNER", "blacksmith-2vcpu-ubuntu-2404")])
         # The switch's own change stays the switch's, and an unreadable record still defers everything.
         self.assertEqual(runner_pools.mirror_writes(value, live, record=SWITCHED_LINUX), [])
         self.assertEqual(runner_pools.mirror_writes(value, live, record="not json"), [])
@@ -612,7 +613,7 @@ class Main(unittest.TestCase):
         switch = self.Switch({"LINUX_RUNNER": "blacksmith-4vcpu-ubuntu-2404",
                               "CI_CLOUD_OVERFLOW_SAVED": MACOS_ONLY_RECORD})
         self.assertEqual(runner_pools.main([], env, api=self.Api(None), switch=switch, now=NOW), 0)
-        self.assertEqual(switch.writes, [("LINUX_RUNNER", "blacksmith-16vcpu-ubuntu-2404")])
+        self.assertEqual(switch.writes, [("LINUX_RUNNER", "blacksmith-2vcpu-ubuntu-2404")])
 
     def test_the_repo_variable_check_hands_in_what_the_mirror_check_reads(self) -> None:
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci-repo-variables.yml").read_text())
