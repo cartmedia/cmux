@@ -31,6 +31,9 @@ jobs:
     # A Blacksmith Testbox exists only in the manaflow-ai organization. Skip
     # elsewhere rather than queue forever for a runner a fork cannot have.
     if: github.repository_owner == 'manaflow-ai'
+    # size-reason: the Testbox is the VM a maintainer's `blacksmith testbox run` builds and tests cmux-tui's
+    # whole Rust workspace on, interactively, for 10-60 minutes; dispatch-only and one session per box id
+    # (concurrency above), so it never joins a burst of CI jobs under the vCPU cap.
     runs-on: blacksmith-32vcpu-ubuntu-2404
     environment:
       # The environments API shows (2026-10-06): one custom deployment
