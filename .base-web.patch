@@ -1,0 +1,302 @@
+diff --git a/webviews/src/pages/feed/store.ts b/webviews/src/pages/feed/store.ts
+index 17aed8e1f25..38a3cd1c665 100644
+--- a/webviews/src/pages/feed/store.ts
++++ b/webviews/src/pages/feed/store.ts
+@@ -1,6 +1,7 @@
+ // The Feed page's state owner on the page side. The feed is a projection of the daemon's feed
+-// client (`cmux.feed.view.read`): the page reads it on open and again on every
+-// `cmux.feed.view.changed`, a newer read supersedes an older reply, and nothing polls. Every
++// client (`cmux.feed.view.read`): the page reads it on open, and on every
++// `cmux.feed.view.changed` reads again only the items it names (a delta read); a newer read
++// supersedes an older reply, and nothing polls. Every
+ // change (an answer, triage, read) is an intent the owner settles; while it waits, the owner's
+ // `pending` dims the item. The page keeps only client view state: the route, the Inbox filter, the
+ // selection, unsent drafts and the reports basket's reply. React reads it through
+@@ -50,6 +51,10 @@ import {
+   type FeedIntentParams,
+   type FeedReport,
+   type FeedReportsResult,
++  type FeedChanged,
++  type FeedEntry,
++  type FeedGroup,
++  type FeedItemSame,
+   type FeedView,
+   type FeedViewParams,
+   type GitHubAction,
+@@ -116,6 +121,11 @@ export class FeedStore {
+   private reportsWatch: "none" | "starting" | "on" = "none";
+   /** The first Inbox read picks GitHub when it is connected, once (FeedInboxView.pickedConnection). */
+   private pickedConnection = false;
++  /** Items changed since the last view the page applied: the next delta read asks for them in full. */
++  private readonly changedSince = new Set<string>();
++  /** A whole read is on its way (a route or filter change, a change without ids): every read until
++   * it lands is whole, so a delta read never fills from a view for other params. */
++  private wholeWanted = true;
+   /** Each report's last reply that was not sent: sent again, it keeps its id. */
+   private readonly unsent = new Map<string, ReportReply>();
+   readonly notices: NoticeQueue = createNoticeQueue();
+@@ -199,8 +209,8 @@ export class FeedStore {
+     if (!this.client || this.viewWatch !== "none") return;
+     this.viewWatch = "starting";
+     try {
+-      const stop = await this.client.subscribe(FeedOps.viewChanged, () => {
+-        if (lifetime === this.lifetime) void this.reload();
++      const stop = await this.client.subscribe<FeedChanged>(FeedOps.viewChanged, (event) => {
++        if (lifetime === this.lifetime) this.onViewChanged(event);
+       });
+       if (lifetime === this.lifetime) {
+         this.stops.push(stop);
+@@ -286,13 +296,46 @@ export class FeedStore {
+     };
+   }
+ 
+-  /** Re-reads the view; an older reply that arrives late is dropped. */
+-  async reload(): Promise<void> {
++  /** `feed-view-changed`: the items it names are read again, and only those (a delta read); a change
++   * without ids (the connection, the GitHub setting) reads the whole view. Each change re-read every
++   * item of the view (up to 2,000, each with its place over every tab) before. */
++  private onViewChanged(event: FeedChanged | undefined): void {
++    const changed = event?.changed ?? [];
++    if (changed.length === 0) {
++      void this.reload();
++      return;
++    }
++    for (const id of changed) this.changedSince.add(id);
++    void this.reload("delta");
++  }
++
++  /** Re-reads the view; an older reply that arrives late is dropped. A delta read asks in full only
++   * for the items changed since the last view it applied (`changedSince`) and fills the rest from
++   * that view; one it cannot fill (an item it never had) reads the whole view. */
++  async reload(mode: "whole" | "delta" = "whole"): Promise<void> {
+     if (!this.client) return;
+     const generation = ++this.generation;
++    const only =
++      mode === "delta" && !this.wholeWanted && this.snapshot.view && this.changedSince.size <= MAX_DELTA_ITEMS
++        ? [...this.changedSince]
++        : undefined;
++    if (!only) this.wholeWanted = true;
+     try {
+-      const view = await this.client.call<FeedView>(FeedOps.viewRead, this.params());
++      const reply = await this.client.call<FeedView>(FeedOps.viewRead, only ? { ...this.params(), only } : this.params());
+       if (generation !== this.generation) return;
++      let view = reply;
++      if (only) {
++        const filled = this.snapshot.view && fillDelta(this.snapshot.view, reply);
++        if (!filled) {
++          this.wholeWanted = true;
++          return this.reload();
++        }
++        view = filled;
++        for (const id of only) this.changedSince.delete(id);
++      } else {
++        this.wholeWanted = false;
++        this.changedSince.clear();
++      }
+       // The first Inbox read: GitHub is the first tab when it is connected. Read it before drawing,
+       // so the Feed's rows never show and then swap.
+       if (this.snapshot.route.view === "inbox" && !this.pickedConnection) {
+@@ -654,3 +697,38 @@ export function rejectOf(error: unknown): FeedReject {
+       return { kind: "refused", message: message(error) };
+   }
+ }
++
++/** The most ids one delta read asks for; past it the page reads the whole view. */
++const MAX_DELTA_ITEMS = 64;
++
++const isSame = (item: ViewItem | FeedItemSame): item is FeedItemSame => (item as FeedItemSame).same === true;
++
++/** A delta read's view with each item it did not send again (`{id, same: true}`) taken from `base`,
++ * the last view the page applied; undefined when one is not there (the page then reads it whole).
++ * Groups, order and counts are the reply's own. */
++export function fillDelta(base: FeedView, reply: FeedView): FeedView | undefined {
++  const held = new Map<string, ViewItem>();
++  for (const group of base.groups)
++    for (const entry of group.entries) {
++      held.set(entry.item.id, entry.item);
++      for (const member of entry.members) held.set(member.id, member);
++    }
++  const fill = (item: ViewItem | FeedItemSame): ViewItem | undefined => (isSame(item) ? held.get(item.id) : item);
++  const groups: FeedGroup[] = [];
++  for (const group of reply.groups) {
++    const entries: FeedEntry[] = [];
++    for (const entry of group.entries) {
++      const item = fill(entry.item);
++      if (!item) return undefined;
++      const members: ViewItem[] = [];
++      for (const member of entry.members) {
++        const filled = fill(member);
++        if (!filled) return undefined;
++        members.push(filled);
++      }
++      entries.push({ ...entry, item, members });
++    }
++    groups.push({ ...group, entries });
++  }
++  return { ...reply, groups };
++}
+diff --git a/webviews/src/pages/feed/types.ts b/webviews/src/pages/feed/types.ts
+index 8e501b46247..41ab794100f 100644
+--- a/webviews/src/pages/feed/types.ts
++++ b/webviews/src/pages/feed/types.ts
+@@ -17,6 +17,9 @@ export interface FeedViewParams {
+   filter?: FeedViewFilter;
+   tz_offset_min?: number;
+   limit?: number;
++  /** A delta read: only these items come in full; every other one is `{id, same: true}` (FeedItemSame),
++   * which the page fills from its last view. Groups, order and counts are always whole. */
++  only?: string[];
+ }
+ 
+ export type FeedItemState = "open" | "answered" | "cancelled" | "expired";
+@@ -228,6 +231,14 @@ export interface FeedView {
+ 
+ export interface FeedChanged {
+   revision: number;
++  /** The items whose visible value moved; empty for a change of the view itself (the connection). */
++  changed?: string[];
++}
++
++/** An item a delta read did not send again: the page has it from its last view. */
++export interface FeedItemSame {
++  id: string;
++  same: true;
+ }
+ 
+ export type FeedIntentKind = "answer" | "decline" | "read" | "archive" | "snooze" | "mark_all_read";
+diff --git a/webviews/src/pages/history/store.ts b/webviews/src/pages/history/store.ts
+index 10b6bdd27ed..cb75a10fb03 100644
+--- a/webviews/src/pages/history/store.ts
++++ b/webviews/src/pages/history/store.ts
+@@ -52,6 +52,9 @@ export interface HistoryStoreOptions {
+   /** The pasteboard write the page can do itself; falls back to the host op when it rejects. */
+   writeClipboard?: (text: string) => Promise<void>;
+   newKey?: () => string;
++  /** The least time between two reads that `history-changed` starts (tests shorten it). */
++  changeReadGapMs?: number;
++  clock?: () => number;
+ }
+ 
+ export class HistoryStore {
+@@ -74,6 +77,9 @@ export class HistoryStore {
+   private pendingAttempt = 0;
+   /** Ends the wait for a hidden page to show again (its `visibilitychange` listener). */
+   private unshown?: () => void;
++  /** The one trailing read for the changes that came within the gap after the last change read. */
++  private changeTimer?: ReturnType<typeof setTimeout>;
++  private lastChangeRead = Number.NEGATIVE_INFINITY;
+ 
+   constructor(
+     private readonly client: PageClient | null,
+@@ -193,6 +199,7 @@ export class HistoryStore {
+     this.unpage?.();
+     this.unpage = undefined;
+     this.clearPending();
++    this.clearChangeTimer();
+   }
+ 
+   /** A list that is not complete (`pending_kinds`) is read again by itself: after 1 s, 2 s, 4 s, then
+@@ -210,23 +217,69 @@ export class HistoryStore {
+     this.pendingAttempt += 1;
+     this.pendingTimer = setTimeout(() => {
+       this.pendingTimer = undefined;
+-      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+-        const shown = () => {
+-          if (document.visibilityState === "hidden") return;
+-          this.unshown?.();
+-          void this.reload();
+-        };
+-        document.addEventListener("visibilitychange", shown);
+-        this.unshown = () => {
+-          document.removeEventListener("visibilitychange", shown);
+-          this.unshown = undefined;
+-        };
++      if (pageHidden()) {
++        this.readWhenShown();
+         return;
+       }
+       void this.reload();
+     }, wait);
+   }
+ 
++  /** A hidden page reads nothing: it reads once when it shows again, however many changes came. */
++  private readWhenShown(): void {
++    if (this.unshown) return;
++    const shown = () => {
++      if (pageHidden()) return;
++      this.unshown?.();
++      void this.reload();
++    };
++    document.addEventListener("visibilitychange", shown);
++    this.unshown = () => {
++      document.removeEventListener("visibilitychange", shown);
++      this.unshown = undefined;
++    };
++  }
++
++  /** `history-changed`: re-reads only when it changed a kind the page shows, never while the page
++   * is hidden (once on show instead), and at most once per `changeReadGapMs` (one trailing read
++   * takes every change that came in the gap). At ~4 changes a second each one re-read the whole
++   * first window (1,000 entries), most for a hidden page or a kind its filter leaves out. */
++  private onChanged(event: HistoryChanged | undefined): void {
++    const shown = filterKinds(this.snapshot.filter);
++    const kinds = event?.kinds ?? [];
++    if (shown.length > 0 && kinds.length > 0 && !kinds.some((kind) => shown.includes(kind))) return;
++    if (pageHidden()) {
++      this.readWhenShown();
++      return;
++    }
++    if (this.changeTimer !== undefined) return;
++    const gap = this.options.changeReadGapMs ?? CHANGE_READ_GAP_MS;
++    const wait = this.lastChangeRead + gap - this.now();
++    if (wait <= 0) {
++      this.changeReadNow();
++      return;
++    }
++    this.changeTimer = setTimeout(() => {
++      this.changeTimer = undefined;
++      if (pageHidden()) this.readWhenShown();
++      else this.changeReadNow();
++    }, wait);
++  }
++
++  private changeReadNow(): void {
++    this.lastChangeRead = this.now();
++    void this.reload();
++  }
++
++  private now(): number {
++    return this.options.clock?.() ?? Date.now();
++  }
++
++  private clearChangeTimer(): void {
++    if (this.changeTimer !== undefined) clearTimeout(this.changeTimer);
++    this.changeTimer = undefined;
++  }
++
+   private clearPending(): void {
+     if (this.pendingTimer !== undefined) clearTimeout(this.pendingTimer);
+     this.pendingTimer = undefined;
+@@ -247,8 +300,8 @@ export class HistoryStore {
+     this.subscribingChanges = true;
+     const epoch = this.linkEpoch;
+     try {
+-      const unsubscribe = await this.client.subscribe<HistoryChanged>(HistoryOps.changed, () => {
+-        if (alive()) void this.reload();
++      const unsubscribe = await this.client.subscribe<HistoryChanged>(HistoryOps.changed, (event) => {
++        if (alive()) this.onChanged(event);
+       });
+       if (!alive()) {
+         unsubscribe();
+@@ -437,6 +490,11 @@ export class HistoryStore {
+   }
+ }
+ 
++/** The least time between two reads that `history-changed` starts. */
++const CHANGE_READ_GAP_MS = 1000;
++
++const pageHidden = (): boolean => typeof document !== "undefined" && document.visibilityState === "hidden";
++
+ /** The waits before each re-read of a list that is not complete; the last repeats. */
+ const PENDING_WAITS_MS = [1000, 2000, 4000, 8000];
+ 
