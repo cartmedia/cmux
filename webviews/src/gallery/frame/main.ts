@@ -277,6 +277,8 @@ function finishLoad(): void {
     shifts: loadShifts.slice(0, 24),
     boxShift: boxes.score,
     boxMoves: boxes.moves,
+    // The load declares nothing: a box that drew twice in one place and then moves is undeclared.
+    ...(boxes.motion ? { undeclared: boxes.motion.undeclared, undeclaredMoves: boxes.motion.moves } : {}),
   };
 }
 
