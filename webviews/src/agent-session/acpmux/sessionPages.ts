@@ -97,7 +97,7 @@ export function allSessionsWanted(): boolean {
  *  search): each connected pane reads the later pages once, and follows from then on. */
 export function wantAllSessions(): void {
   allWanted = true;
-  for (const want of [...wantsAll]) want();
+  for (const want of wantsAll) want();
 }
 
 /** `list` with `row` in place of its own copy (the same id and peer), newest first as acpmux sorts. */

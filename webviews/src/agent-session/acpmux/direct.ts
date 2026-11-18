@@ -5866,8 +5866,7 @@ export class AcpmuxDirectClient {
     const shown = this.selectedSessionId;
     // The chat on screen older than the rows held (a list read anew holds its first page): asked
     // by itself before it is called gone.
-    if (shown !== undefined && !this.sessions.some((session) => session.sessionId === shown))
-      await this.listOne(shown);
+    if (shown !== undefined && !this.sessions.some((session) => session.sessionId === shown)) await this.listOne(shown);
     const missing =
       this.selectedSessionId !== undefined &&
       !this.sessions.some((session) => session.sessionId === this.selectedSessionId);
