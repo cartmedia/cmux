@@ -14,6 +14,7 @@ import { parseNewTabTemplate, type NewTabTemplate } from "./newtab/templates";
 import { suggestionOrder, type SuggestionOrder } from "./newtab/suggestionOrder";
 import { isStartableProject } from "./newtab/startedProject";
 import { seedWarmNewTab } from "./newtab/warmSnapshot";
+import { replacedSince } from "./sessionIndex";
 import { ageWithDate } from "./timeLabels";
 
 /// The three things a new tab can become (#16620). Order is the switch's order and Tab's cycle.
@@ -227,21 +228,94 @@ export function recentSessions(
   // the list's length with a cheap key, a sort was that times log n calls to `sessionMark` (Leo
   // 2026-11-18, "typing in the composer still slow 😞 there must be a lot of open stuff?";
   // bench/session-scale-typing.bench.ts).
+  return rankedRecent(sessions, count, fold).result.map((ranked) => ranked.entry);
+}
+
+function rankedRecent(sessions: AcpmuxSnapshot["sessions"], count: number, fold: boolean) {
   const all: Ranked[] = [];
   for (const session of sessions) {
-    const entry = normalizedSessionEntry(session as AcpmuxSessionEntry & Record<string, unknown>);
-    // A chat nothing was sent in yet (a New Tab's chip pick starts one) is no recent chat.
-    if (!listed(entry) || entry.unsent) continue;
-    all.push({ entry, urgency: sessionMark(entry, false) === "input" ? 0 : 1, at: activityTime(entry) ?? 0 });
+    const ranked = rankOf(normalizedSessionEntry(session as AcpmuxSessionEntry & Record<string, unknown>));
+    if (ranked) all.push(ranked);
   }
-  if (!fold) return best(all, count, () => true);
+  if (!fold) return { shown: [], result: best(all, count, () => true) };
   // A child folds only under a parent this list shows; under one past the cut it lists on its own.
   const shown = best(all, count, (entry) => !entry.spawnedBy);
-  const parents = new Set(shown.map((entry) => entry.sessionId));
-  return best(all, count, (entry) => !folded(entry, parents));
+  const parents = new Set(shown.map((ranked) => ranked.entry.sessionId));
+  return { shown, result: best(all, count, (entry) => !folded(entry, parents)) };
+}
+
+/// A chat's place among the recent ones; none for a chat nothing was sent in yet (a New Tab's chip
+/// pick starts one), which is no recent chat.
+function rankOf(entry: AcpmuxSessionEntry): Ranked | undefined {
+  if (!listed(entry) || entry.unsent) return undefined;
+  return { entry, urgency: sessionMark(entry, false) === "input" ? 0 : 1, at: activityTime(entry) ?? 0 };
 }
 
 type Ranked = { entry: AcpmuxSessionEntry; urgency: number; at: number };
+
+/// `recentSessions` of a list that changes a chat at a time, kept as it changes: a changed chat
+/// that stays out of the shown ones, or moves up among them, reads no other chat. The same array
+/// while the shown chats are the same entries. Anything else (a shown chat moving down or going,
+/// one coming in, a chat added) ranks the whole list again. Each New Tab page (a tab's, the
+/// prewarmed spare) read all 10K of Leo's chats on every event of any chat (Leo, 2026-11-18,
+/// "typing in the composer still slow 😞 there must be a lot of open stuff?";
+/// bench/session-scale-typing.bench.ts).
+export class RecentSessions {
+  private last: AcpmuxSnapshot["sessions"] | undefined;
+  private asked = "";
+  private shown: Ranked[] = [];
+  private result: Ranked[] = [];
+  private entries: AcpmuxSessionEntry[] = [];
+
+  of(sessions: AcpmuxSnapshot["sessions"], count = RECENT_COUNT, fold = true): AcpmuxSessionEntry[] {
+    const asked = `${count}:${fold}`;
+    if (sessions === this.last && asked === this.asked) return this.entries;
+    const replaced =
+      this.last === undefined || asked !== this.asked ? undefined : replacedSince(this.last, sessions);
+    const from = this.last;
+    this.last = sessions;
+    this.asked = asked;
+    if (replaced && from && replaced.every((at) => this.moved(from[at]!, sessions[at]!, count, fold))) {
+      if (this.result.some((ranked, index) => ranked.entry !== this.entries[index]))
+        this.entries = this.result.map((ranked) => ranked.entry);
+      return this.entries;
+    }
+    const ranked = count <= 0 ? { shown: [], result: [] } : rankedRecent(sessions, count, fold);
+    this.shown = ranked.shown;
+    this.result = ranked.result;
+    this.entries = this.result.map((entry) => entry.entry);
+    return this.entries;
+  }
+
+  /// Applies one chat replaced in place; false when the whole list must be ranked again.
+  private moved(fromRaw: AcpmuxSnapshot["sessions"][number], toRaw: AcpmuxSnapshot["sessions"][number], count: number, fold: boolean) {
+    if (count <= 0) return true;
+    const old = normalizedSessionEntry(fromRaw as AcpmuxSessionEntry & Record<string, unknown>);
+    const next = normalizedSessionEntry(toRaw as AcpmuxSessionEntry & Record<string, unknown>);
+    if (old.sessionId !== next.sessionId || old.spawnedBy !== next.spawnedBy) return false;
+    const was = rankOf(old);
+    const now = rankOf(next);
+    if (fold && !next.spawnedBy && !kept(this.shown, count, old.sessionId, was, now)) return false;
+    const parents = fold ? new Set(this.shown.map((ranked) => ranked.entry.sessionId)) : undefined;
+    const keep = now && (!parents || !folded(now.entry, parents)) ? now : undefined;
+    return kept(this.result, count, old.sessionId, was, keep);
+  }
+}
+
+/// `top` (the first `count` in `before` order) with chat `id` ranked `now` instead of `was`, kept in
+/// place when that cannot change which chats it holds: false when it may.
+function kept(top: Ranked[], count: number, id: string, was: Ranked | undefined, now: Ranked | undefined): boolean {
+  const at = top.findIndex((ranked) => ranked.entry.sessionId === id);
+  if (at >= 0) {
+    // A shown chat moving down may give its place to one not shown: rank again.
+    if (!now || !was || before(now, was) > 0) return false;
+    top[at] = now;
+    top.sort(before);
+    return true;
+  }
+  // A chat not shown that now ranks among the shown comes in: rank again.
+  return !now || (top.length === count && before(now, top[count - 1]!) > 0);
+}
 
 /// Chats asking for input first, then the newest. Chats reported in the same millisecond tie on
 /// their durable ids, so a snapshot's arrival order cannot make the rows trade places.
@@ -250,7 +324,7 @@ const before = (a: Ranked, b: Ranked) =>
 
 /// The first `count` of `all` that `keep` keeps, in `before` order: what sorting `all` and taking
 /// the first `count` kept ones gives, in a pass that holds only `count` at a time.
-function best(all: readonly Ranked[], count: number, keep: (entry: AcpmuxSessionEntry) => boolean) {
+function best(all: readonly Ranked[], count: number, keep: (entry: AcpmuxSessionEntry) => boolean): Ranked[] {
   const top: Ranked[] = [];
   if (count <= 0) return [];
   for (const ranked of all) {
@@ -263,7 +337,7 @@ function best(all: readonly Ranked[], count: number, keep: (entry: AcpmuxSession
       at -= 1;
     }
   }
-  return top.map((ranked) => ranked.entry);
+  return top;
 }
 
 /// "now", "5m", "3h", "2d": the card's age, as compact as the sidebar's.
