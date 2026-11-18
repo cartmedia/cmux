@@ -51,8 +51,43 @@ pub struct DeepHit {
 /// What one query found, by chat key.
 pub type Found = Arc<HashMap<String, DeepHit>>;
 
-/// Reads the index for a query's words (None: it could not be read).
-pub type Search = Box<dyn Fn(&[String]) -> Option<Vec<(ts::Hit, u32)>> + Send + Sync>;
+/// What a window asks the index: the query's indexable words ([`indexable`]) and the search
+/// syntax's filters (`chats/window.rs`). Plain words ask with no filter.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ask {
+    pub words: Vec<String>,
+    pub exclude: Vec<String>,
+    /// None: prompts and answers.
+    pub role: Option<ts::Role>,
+    pub harness: Option<ts::Harness>,
+    pub folder: Option<String>,
+    pub since_ms: Option<i64>,
+    pub before_ms: Option<i64>,
+}
+
+impl Ask {
+    /// Words alone.
+    pub fn words(words: Vec<String>) -> Self {
+        Self { words, ..Self::default() }
+    }
+
+    /// The index query this asks (`ts::Index::chats_matching`); None with no words.
+    pub fn query(&self) -> Option<ts::Query> {
+        let (first, rest) = self.words.split_first()?;
+        let mut q = ts::Query::new(first.clone());
+        q.also = rest.to_vec();
+        q.exclude.clone_from(&self.exclude);
+        q.role = self.role;
+        q.harness = self.harness;
+        q.folder.clone_from(&self.folder);
+        q.since_ms = self.since_ms;
+        q.before_ms = self.before_ms;
+        Some(q)
+    }
+}
+
+/// Reads the index for what a window asks (None: it could not be read).
+pub type Search = Box<dyn Fn(&Ask) -> Option<Vec<(ts::Hit, u32)>> + Send + Sync>;
 
 /// The words of `words` the index can serve, longest first; none: the index is not asked.
 pub fn indexable(words: &[String]) -> Vec<String> {
@@ -94,9 +129,9 @@ struct Shared {
 
 #[derive(Default)]
 struct State {
-    answers: VecDeque<(Vec<String>, Instant, Found)>,
-    wanted: Option<Vec<String>>,
-    running: Option<Vec<String>>,
+    answers: VecDeque<(Ask, Instant, Found)>,
+    wanted: Option<Ask>,
+    running: Option<Ask>,
     worker: bool,
     closed: bool,
 }
@@ -128,21 +163,21 @@ impl Deep {
         let _ = self.shared.search.set(search);
     }
 
-    /// What is held for `words` (their indexable words, [`indexable`]), and whether a newer
+    /// What is held for `ask` (its words the indexable ones, [`indexable`]), and whether a newer
     /// answer is coming (the window is still `filling`). Never waits for the index.
-    pub fn answer(&self, words: &[String]) -> (Option<Found>, bool) {
-        if self.shared.search.get().is_none() || words.is_empty() {
+    pub fn answer(&self, ask: &Ask) -> (Option<Found>, bool) {
+        if self.shared.search.get().is_none() || ask.words.is_empty() {
             return (None, false);
         }
         let mut state = lock(&self.shared.state);
-        let held = state.answers.iter().find(|a| a.0 == words).map(|a| (a.1, a.2.clone()));
+        let held = state.answers.iter().find(|a| a.0 == *ask).map(|a| (a.1, a.2.clone()));
         if let Some((at, found)) = &held
             && at.elapsed() < FRESH
         {
             return (Some(found.clone()), false);
         }
-        if state.running.as_deref() != Some(words) {
-            state.wanted = Some(words.to_vec());
+        if state.running.as_ref() != Some(ask) {
+            state.wanted = Some(ask.clone());
             self.shared.wake.notify_one();
         }
         if !state.worker {
@@ -173,25 +208,25 @@ impl Drop for Deep {
 /// The thread: reads the newest wanted query, holds its answer, tells the windows; again.
 fn work(shared: &Shared) {
     loop {
-        let words = {
+        let ask = {
             let mut state = lock(&shared.state);
             loop {
                 if state.closed {
                     return;
                 }
-                if let Some(words) = state.wanted.take() {
-                    state.running = Some(words.clone());
-                    break words;
+                if let Some(ask) = state.wanted.take() {
+                    state.running = Some(ask.clone());
+                    break ask;
                 }
                 state = shared.wake.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
             }
         };
-        let found = shared.search.get().and_then(|search| search(&words)).unwrap_or_default();
+        let found = shared.search.get().and_then(|search| search(&ask)).unwrap_or_default();
         let found: Found = Arc::new(by_chat(found));
         {
             let mut state = lock(&shared.state);
-            state.answers.retain(|a| a.0 != words);
-            state.answers.push_front((words, Instant::now(), found));
+            state.answers.retain(|a| a.0 != ask);
+            state.answers.push_front((ask, Instant::now(), found));
             state.answers.truncate(KEEP);
             state.running = None;
         }
@@ -249,13 +284,13 @@ mod tests {
         let changed = Arc::new(tokio::sync::watch::channel(0_u64).0);
         let mut moved = changed.subscribe();
         let deep = Deep::new(changed.clone());
-        let words = vec!["parser".to_owned()];
+        let words = Ask::words(vec!["parser".to_owned()]);
         assert_eq!(deep.answer(&words), (None, false), "no index: nothing asked");
         let asked = Arc::new(Mutex::new(0_usize));
         let count = asked.clone();
-        deep.set_search(Box::new(move |words| {
+        deep.set_search(Box::new(move |ask| {
             *lock(&count) += 1;
-            assert_eq!(words, ["parser".to_owned()]);
+            assert_eq!(ask.words, ["parser".to_owned()]);
             Some(vec![(hit("s1", ts::Role::User, 7), 1)])
         }));
         let (first, coming) = deep.answer(&words);

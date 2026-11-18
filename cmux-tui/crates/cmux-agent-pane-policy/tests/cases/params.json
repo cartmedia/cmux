@@ -2013,6 +2013,53 @@
   "breaks": false
  },
  {
+  "name": "Find in Chat sends the search syntax's toggles",
+  "frame": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "_acpmux/transcript_search",
+   "params": {
+    "sessionId": "s",
+    "query": "deploy -flaky from:me since:7d",
+    "caseSensitive": true,
+    "sinceMs": 1,
+    "beforeMs": 2,
+    "tzOffsetMinutes": -480
+   }
+  },
+  "mode_fields": null,
+  "breaks": false
+ },
+ {
+  "name": "The Find bar reads its query's operators",
+  "frame": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "_acpmux/search_syntax",
+   "params": {
+    "query": "from:me since:",
+    "cursor": 14,
+    "tzOffsetMinutes": 60
+   }
+  },
+  "mode_fields": null,
+  "breaks": false
+ },
+ {
+  "name": "The search syntax reads no session or transcript",
+  "frame": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "_acpmux/search_syntax",
+   "params": {
+    "query": "x",
+    "harnessSessionId": "other"
+   }
+  },
+  "mode_fields": null,
+  "breaks": true
+ },
+ {
   "name": "Find in Chat never searches another transcript or a peer",
   "frame": {
    "jsonrpc": "2.0",

@@ -12,10 +12,15 @@ pub const SNIPPET: usize = 160;
 /// How many of the snippet's characters come before the first word, when the text has them.
 const BEFORE: usize = 48;
 
-/// The words of a query, lowercased, each once.
+/// The words of a query, lowercased, each once; with the search syntax (`chats/window.rs`), what
+/// a message must not hold and whose it must be.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Needle {
     words: Vec<String>,
+    /// Folded: a message holding any of these is not a hit (`-word`).
+    exclude: Vec<String>,
+    /// Only answers (`Some(true)`, `from:agent`) or only prompts (`Some(false)`, `from:me`).
+    answers: Option<bool>,
 }
 
 impl Needle {
@@ -33,7 +38,45 @@ impl Needle {
         if words.is_empty() {
             return Err("query has no words; list chats with _acpmux/chats".to_owned());
         }
-        Ok(Self { words })
+        Ok(Self { words, exclude: Vec::new(), answers: None })
+    }
+
+    /// The search syntax's terms (a phrase is one term with its spaces: a message's text is held
+    /// flattened, one space for each whitespace run), what no hit may hold, and whose it must be.
+    pub fn of_terms(
+        terms: &[String],
+        exclude: &[String],
+        answers: Option<bool>,
+    ) -> Result<Self, String> {
+        let mut words: Vec<String> = Vec::new();
+        for term in terms.iter().map(|t| flatten(t)).filter(|t| !t.is_empty()).map(|t| fold(&t)) {
+            if !words.contains(&term) {
+                words.push(term);
+            }
+        }
+        if words.is_empty() {
+            return Err("query has no words".to_owned());
+        }
+        let exclude = exclude.iter().map(|e| fold(&flatten(e))).filter(|e| !e.is_empty()).collect();
+        Ok(Self { words, exclude, answers })
+    }
+
+    /// Whether a message (`answer`: an answer, else a prompt) that holds the words may be a hit:
+    /// its role is the one asked and it holds none of the excluded words.
+    pub(crate) fn accepts(&self, text: &str, answer: bool) -> bool {
+        if self.answers.is_some_and(|want| want != answer) {
+            return false;
+        }
+        if self.exclude.is_empty() {
+            return true;
+        }
+        let folded = Folded::new(text);
+        !self.exclude.iter().any(|word| folded.text.contains(word.as_str()))
+    }
+
+    /// Whether this asks more than words (an exclusion or a role).
+    pub(crate) fn filters(&self) -> bool {
+        !self.exclude.is_empty() || self.answers.is_some()
     }
 
     /// The character index in `text` where the first of the words starts, when `text` holds
@@ -51,6 +94,11 @@ impl Needle {
     /// The query's words, lowercased.
     pub(crate) fn words(&self) -> &[String] {
         &self.words
+    }
+
+    /// Whether `other` excludes and picks roles as this does.
+    pub(crate) fn same_filters(&self, other: &Self) -> bool {
+        self.exclude == other.exclude && self.answers == other.answers
     }
 
     /// The character indexes in `text` of every character that is part of one of the words, in

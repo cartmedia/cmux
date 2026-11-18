@@ -100,6 +100,7 @@ impl super::Hub {
             answers.insert(0, answer);
         }
         let mut merged = merge(answers, unreached, &p, skip, 0);
+        merged["parsed"] = p.parsed().to_json();
         if let (Some(session), Some(harness)) = (session, p.harness_session.clone()) {
             merged =
                 self.place_hits(session.id.clone(), harness, own, p.query.clone(), merged).await;

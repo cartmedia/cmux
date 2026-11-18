@@ -291,9 +291,11 @@ keyed! {
     TrustSetParams: ["cwd", "level", "sessionId", "peer"];
     /// `_acpmux/transcript_search` (`transcript_search.rs`).
     TranscriptSearchParams: [
-        "query", "sessionId", "harnessSessionId", "role", "sinceMs", "limit", "context", "host",
-        "order", "window", "offset",
+        "query", "sessionId", "harnessSessionId", "role", "sinceMs", "beforeMs", "caseSensitive",
+        "tzOffsetMinutes", "limit", "context", "host", "order", "window", "offset",
     ];
+    /// `_acpmux/search_syntax` (`transcript_search.rs`).
+    SearchSyntaxParams: ["query", "cursor", "tzOffsetMinutes"];
     /// `_acpmux/warm`.
     WarmParams: ["sessionIds", "limit"];
     /// `_acpmux/watch_take_over`.
