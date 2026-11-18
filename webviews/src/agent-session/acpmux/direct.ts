@@ -1,4 +1,5 @@
 import { pageAttention } from "./attention";
+import { pageScrollQuiet } from "./scrollQuiet";
 import { sentFrom, type SentFrom } from "./conversation/sentFromHarness";
 import { stuckAttention } from "./loopEpisode";
 import { externalAccessFromRequest } from "./permissions/externalAccess";
@@ -3798,6 +3799,8 @@ export class AcpmuxDirectClient {
     this.onLost = onLost;
     this.selectedSessionId = host.sessionId;
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.showChanged);
+    // Listens from the start: another page's scroll is heard only by a page already listening.
+    pageScrollQuiet();
     this.stopAttention = pageAttention()?.subscribe(this.attentionChanged);
     // The chat on screen is handed over when this page goes away as well as when it is left, so a
     // tab closed or reloaded on a chat leaves that chat warm for the next tab (keptAttachments.ts
@@ -7907,7 +7910,25 @@ export class AcpmuxDirectClient {
       this.listChangedWhileHidden = true;
       return;
     }
+    // A chat scrolling on this page or another of the renderer's (scrollQuiet.ts): another chat's
+    // change waits for the scroll to rest and draws then, every one held in one snapshot, so the
+    // wheel's frames are the scrolled chat's own.
+    if (session.sessionId !== this.selectedSessionId && this.holdForScroll()) return;
     this.emitInFrame("session changed");
+  }
+
+  /// The wait of other chats' changes held while a chat scrolls, if any: one at a time.
+  private scrollHold?: () => void;
+  /// Holds the drawing of other chats' changes while a chat scrolls; false when none does.
+  private holdForScroll(): boolean {
+    if (this.scrollHold) return true;
+    const quiet = pageScrollQuiet();
+    if (!quiet?.scrolling()) return false;
+    this.scrollHold = quiet.afterScroll(() => {
+      this.scrollHold = undefined;
+      if (!this.closed) this.emitInFrame("session changed");
+    });
+    return true;
   }
 
   private applyPermission(message: any): void {
@@ -16305,6 +16326,8 @@ export class AcpmuxDirectClient {
   }
   private stopPageListeners(): void {
     if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.showChanged);
+    this.scrollHold?.();
+    this.scrollHold = undefined;
     this.stopAttention?.();
     this.stopAttention = undefined;
     if (typeof window !== "undefined") {
