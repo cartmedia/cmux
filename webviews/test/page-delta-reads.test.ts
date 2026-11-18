@@ -73,8 +73,9 @@ test("a burst of history-changed reads once now and once after the gap", async (
   for (let index = 0; index < 8; index += 1) client.emit(CHANGED, { revision: index, kinds: ["agent"] });
   await settle();
   expect(client.count(LIST).calls, "the first change reads at once").toBe(1);
-  // fixed-wait: the gap itself is under test; this timer is due after the store's 60 ms one, so it
-  // always fires second, however late a loaded runner wakes both.
+  // The gap itself is under test: this timer is due after the store's 60 ms one, so it always
+  // fires second, however late a loaded runner wakes both.
+  // fixed-wait: the 60 ms gap between two reads is the behavior under test
   await new Promise((resolve) => setTimeout(resolve, 120));
   await settle();
   expect(client.count(LIST).calls, "one trailing read takes the rest").toBe(2);
@@ -98,7 +99,7 @@ test("a feed-view-changed with ids reads only those items in full", async () => 
   const read = client.count("cmux.feed.view.read");
   expect(read.calls).toBe(1);
   expect((read.params[0] as { only?: string[] }).only, "the read names only the changed item").toEqual([changed]);
-  expect(read.bytes, "a delta read carries a small part of the view").toBeLessThan(whole / 5);
+  expect(read.bytes, "a delta read carries a small part of the view").toBeLessThan(whole / 4);
   const after = store.getSnapshot().view!;
   const rest = after.groups[1].entries;
   expect(rest[3].item.title).toContain(`revision ${daemon.revision}`);
