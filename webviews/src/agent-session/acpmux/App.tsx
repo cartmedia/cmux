@@ -543,8 +543,7 @@ import { viewerImages } from "./summary/chatGallery";
 import { ImageViewer } from "./conversation/ImageViewer";
 import { ImageViewerContext } from "./conversation/imageViewerContext";
 import { sessionLink } from "./links";
-import { startDevMotionAudit } from "./devMotionAudit";
-import { declareMove } from "../../layout/motionContract";
+import { startDevMotionAudit, useStreamAppendDeclaration } from "./devMotionAudit";
 import { ChatHeaderInlineStatus, ChatHeaderStatus } from "./header/ChatHeaderStatus";
 import { ChatHeaderTools } from "./header/ChatHeaderTools";
 import { HEADER_ACTIONS, guardedChatMenu, menuGroups, type ChatMenuItem } from "./header/chatHeaderToolsModel";
@@ -2444,12 +2443,8 @@ function AcpmuxPane({ initialChat }: { initialChat?: InitialChat }) {
   // rules it has not read yet. A chat on another machine or in the cloud gets none.
   const [rules, setRules] = useState<ForumRule[]>([]);
   const turnWorking = snapshot.isWorking;
-  // While a reply streams, the transcript grows at its end: a declared move of its rows
-  // (schemas/layout-motion/contract.json `stream-append`), judged by the layout-motion audit.
-  useEffect(
-    () => (turnWorking ? declareMove({ event: "stream-append", scope: "all", by: "turn working" }) : undefined),
-    [turnWorking],
-  );
+  // A streaming reply grows the transcript at its end: a declared layout move.
+  useStreamAppendDeclaration(turnWorking);
   // Only once the chat's summary says where it runs: a remote chat never shows this Mac's rules.
   const rulesLocal = snapshot.summary !== undefined && healthLocal;
   useEffect(() => {
