@@ -92,3 +92,5 @@ fn opened(hub: &Hub, s: &crate::hub::Session) -> Value {
     let meta = s.meta();
     json!({"modes": meta.modes, "configOptions": meta.config_options, "_meta": {"acpmux": hub.session_summary(s)}})
 }
+
+pub(crate) const REPLAY_LIMIT: u64 = 100_000;
