@@ -87,8 +87,12 @@ if (params.has("mock") && params.has("slowDaemon")) {
   fixture.cmuxAcpmuxMockSlowMs = Number(params.get("slowMs") ?? 6_000);
 }
 if (devHost) installDevHost(devHost);
+// `?mock&newtab`: the page opens as a New Tab page (a tab's New Tab, or the app's prewarmed spare),
+// as the app's handshake names one (bench/session-scale-typing.bench.ts).
 else if (params.has("mock") && !window.webkit?.messageHandlers?.agentSession)
-  window.cmuxAcpmuxActions = { ready: async () => ({ protocolVersion: 1, transport: "mock" }) };
+  window.cmuxAcpmuxActions = {
+    ready: async () => ({ protocolVersion: 1, transport: "mock", ...(params.has("newtab") ? { newTab: true } : {}) }),
+  };
 if (!devHost && params.has("mock")) {
   const { installAppPanelsDevClient } = await import("../../apps/scene/panelsClient");
   const { MockAppPanelsClient } = await import("../../apps/scene/panelsMock");
