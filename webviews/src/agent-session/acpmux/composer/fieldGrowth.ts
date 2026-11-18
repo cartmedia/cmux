@@ -9,6 +9,7 @@ import { MOTION_EASE_OUT, MOTION_MS } from "../../../motion/scale.generated";
 import { motionMode } from "../../../ui/motion/motionMode";
 import { fieldGrowthMotion, type FieldGrowthArm } from "./fieldGrowth.experiment";
 import { sliceHoldsInline } from "./inlineNode";
+import { declareComposerGrowth } from "./composerGrowthMove";
 
 // The prompt field's height moves to its text's on one motion, not in a step per line (Leo,
 // 2026-11-07: "it's like the composer kind of doesn't grow smoothly. It grows in bursts."). The
@@ -226,7 +227,14 @@ export function fieldGrowth(external: () => boolean): Plugin {
         }
         if (running) land(field);
         if (from < 0 || Math.abs(to - from) < 0.5) return;
-        if (!moves) return;
+        // The field gained or lost a line: the composer box and the rows it lifts move with it, declared
+        // for as long as it moves (composerGrowthMove.ts). At once (an attachment placed, a value set from
+        // outside, motion off), that is this frame.
+        const win = field.ownerDocument.defaultView;
+        if (!moves) {
+          declareComposerGrowth(win, "composer field");
+          return;
+        }
         const lineHeight = Number.parseFloat(getComputedStyle(field).lineHeight) || 20;
         const capped = field.scrollHeight > field.clientHeight + 1;
         // The rects include the composer's density zoom; line height and keyframes are in its CSS pixels. Unscaled, a
@@ -242,6 +250,7 @@ export function fieldGrowth(external: () => boolean): Plugin {
           running ? running.end - now : undefined,
         );
         const timing = { duration, easing };
+        declareComposerGrowth(win, "composer field", duration + MOTION_MS.quick);
         const animation = field.animate(keyframes, timing);
         // Started now on the document's clock, not left pending: WebKit holds a pending animation a
         // few frames, which the rows' move (VirtualTranscript) would run ahead of. A retarget moves
