@@ -39,7 +39,7 @@ export function feedItem(index: number, revision = 1): ViewItem {
     kind: "notice",
     title: `Build ${index} finished (revision ${revision})`,
     body: "All 214 checks passed on the branch; the preview is ready to open.",
-    poster: { kind: "agent", id: "agent_ci", name: "CI" } as ViewItem["poster"],
+    poster: { kind: "agent", label: "CI" },
     state: "open",
     created_at: 1_790_000_000_000 - index * 60_000,
     revision,
