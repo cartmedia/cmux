@@ -19,12 +19,16 @@ on:
 permissions: {}
 
 concurrency:
-  group: classic-frozen-guard-${{ github.event.pull_request.number }}
+  group: classic-frozen-guard-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && !github.event.changes.base && format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   classic-frozen:
-    name: classic-frozen-guard
+    # A title or description edit changes nothing it reads: it starts no runner, under a name of its own and
+    # a concurrency group of its own, so it neither reads as a pass over a red nor cancels a real run
+    # (tests/test_ci_edit_events_start_no_runner.py). A retarget (changes.base) re-runs it.
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'classic-frozen-guard (edit, not re-run)' || 'classic-frozen-guard' }}
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) }}
     # Every label change re-runs it (a skipped run would read as a pass and replace a failing one).
     # A base-revision control-plane job (cla-policy-guard.yml's runner rule): a VM destroyed after one job,
     # never a persistent or contributor-controlled machine.

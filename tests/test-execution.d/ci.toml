@@ -236,6 +236,10 @@ path = "tests/test_ci_label_events_skip_full_ci.py"
 lane = "linux-guard"
 
 [[test]]
+path = "tests/test_ci_edit_events_start_no_runner.py"
+lane = "linux-guard"
+
+[[test]]
 path = "tests/test_ci_late_placement.py"
 lane = "linux-guard"
 

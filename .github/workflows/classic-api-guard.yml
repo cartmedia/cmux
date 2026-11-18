@@ -16,13 +16,16 @@ on:
 permissions: {}
 
 concurrency:
-  group: classic-api-guard-${{ github.event.pull_request.number }}
+  group: classic-api-guard-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base && format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   classic-api:
-    name: classic-api-guard
-    # Every edit re-runs it (a skipped run would read as a pass and replace a failing one).
+    # A title-only edit changes nothing this job reads: it starts no runner, and its skipped job takes a name
+    # and a concurrency group of its own, so it never reads as a pass over a red nor cancels a real run
+    # (tests/test_ci_edit_events_start_no_runner.py).
+    name: ${{ github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base && 'classic-api-guard (edit, not re-run)' || 'classic-api-guard' }}
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.body && !github.event.changes.base) }}
     runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || fromJSON(vars.RUNNER_POOLS).linux }}
     timeout-minutes: 5
     permissions:

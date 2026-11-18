@@ -9,7 +9,7 @@ name: cmux-next size budget
 # bytes the app ships, the built web bundles (built for the base and the head when a web input
 # changed, web-bundle-key.py --routed) and the crates each shipped Rust binary links. Growth over
 # the budget's threshold, or a new crate, fails until the description has a line
-# `size: <reason>`. Editing the description re-runs it.
+# `size: <reason>`. Adding, changing or removing that line re-runs it; any other edit starts no runner.
 #
 # What the head can change: the job that decides (size-budget) runs no code of the head. It reads
 # the head only through git, and runs the base commit's checker and budget, written out with
@@ -26,14 +26,17 @@ on:
 permissions: {}
 
 concurrency:
-  group: cmux-next-size-budget-${{ github.event.pull_request.number }}
+  group: cmux-next-size-budget-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && !(github.event.changes.body && (contains(github.event.pull_request.body, 'size:') || contains(github.event.changes.body.from, 'size:'))) && format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   plan:
-    name: cmux-next size budget (plan)
-    # An edit that leaves the description as it was (a title, a base) changes nothing measured.
-    if: ${{ github.event.action != 'edited' || github.event.changes.body != null }}
+    # An edit that leaves the `size:` line as it was (a title, a base, the rest of the description) changes
+    # nothing measured: it starts no runner, and its skipped job takes a name and a concurrency group of its
+    # own, so it never reads as a pass over a red nor cancels a real run
+    # (tests/test_ci_edit_events_start_no_runner.py).
+    name: ${{ github.event.action == 'edited' && !(github.event.changes.body && (contains(github.event.pull_request.body, 'size:') || contains(github.event.changes.body.from, 'size:'))) && 'cmux-next size budget (plan) (edit, not re-run)' || 'cmux-next size budget (plan)' }}
+    if: ${{ !(github.event.action == 'edited' && !(github.event.changes.body && (contains(github.event.pull_request.body, 'size:') || contains(github.event.changes.body.from, 'size:')))) }}
     runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || vars.LINUX_RUNNER || fromJSON(vars.RUNNER_POOLS).linux_8 }}
     timeout-minutes: 5
     permissions:
@@ -138,10 +141,14 @@ jobs:
           echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
 
   size-budget:
-    name: cmux-next size budget
+    # An edit that leaves the `size:` line as it was (a title, a base, the rest of the description) changes
+    # nothing measured: it starts no runner, and its skipped job takes a name and a concurrency group of its
+    # own, so it never reads as a pass over a red nor cancels a real run
+    # (tests/test_ci_edit_events_start_no_runner.py).
+    name: ${{ github.event.action == 'edited' && !(github.event.changes.body && (contains(github.event.pull_request.body, 'size:') || contains(github.event.changes.body.from, 'size:'))) && 'cmux-next size budget (edit, not re-run)' || 'cmux-next size budget' }}
+    if: ${{ !(github.event.action == 'edited' && !(github.event.changes.body && (contains(github.event.pull_request.body, 'size:') || contains(github.event.changes.body.from, 'size:')))) && (!cancelled() && needs.plan.result == 'success') }}
     needs: [plan, web-base, web-head]
     # Runs when the web builds ran or were skipped; a failed build fails this check below.
-    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || vars.LINUX_RUNNER || fromJSON(vars.RUNNER_POOLS).linux_8 }}
     timeout-minutes: 10
     permissions:

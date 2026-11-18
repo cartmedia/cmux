@@ -32,11 +32,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: backend-migrations-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  group: backend-migrations-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}${{ github.event.action == 'edited' && !github.event.changes.base && format('-edit-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 jobs:
   plan:
+    # A title or description edit changes nothing it reads: it starts no runner, under names and a concurrency
+    # group of its own (tests/test_ci_edit_events_start_no_runner.py). A retarget (changes.base) re-runs it.
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'plan (edit, not re-run)' || 'plan' }}
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) }}
     runs-on: ${{ github.repository_owner != 'manaflow-ai' && 'ubuntu-24.04' || contains(fromJSON('["ubuntu-24.04","blacksmith-2vcpu-ubuntu-2404","blacksmith-4vcpu-ubuntu-2404"]'), vars.CI_TRUSTED_RUNNER) && vars.CI_TRUSTED_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }} # ephemeral-required: trusted tokens; CI_TRUSTED_RUNNER picks GitHub-hosted or Blacksmith
     # Recent runs: 20s median, 51s max (GitHub API reads and a SQL lint).
     timeout-minutes: 10
@@ -242,9 +246,9 @@ jobs:
           bun migrate.ts --env production --dir "$RUNNER_TEMP/head-migrations" --verify
 
   gate:
-    name: backend migrations applied
+    name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'backend migrations applied (edit, not re-run)' || 'backend migrations applied' }}
     needs: [plan, apply-production]
-    if: always()
+    if: ${{ !(github.event.action == 'edited' && !github.event.changes.base) && (always()) }}
     # merge_group runs this file from the queue commit (PR content), so it never gets an
     # environment or secrets (the environments allow only main and feat-cmux-next); the queue
     # only admits PRs whose pull_request_target gate passed. Fork PRs never get secrets here.
