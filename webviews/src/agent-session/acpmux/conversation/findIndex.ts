@@ -8,6 +8,7 @@
 // Find works on the loaded rows as before.
 import type { AcpmuxRow } from "../model";
 import type { FindMatch } from "./chatFind";
+import { readParsed, type ParsedQuery, type SyntaxAnswer, type SyntaxAsk } from "./searchSyntax";
 
 /** One hit of the daemon's index in this chat, as Find reads it. */
 export type IndexHit = {
@@ -30,11 +31,22 @@ export type IndexAnswer = {
   hits: IndexHit[];
   /** Every hit of the query in the chat, past this page; absent when the daemon did not count. */
   total?: number;
+  /** How the daemon read the query (searchSyntax.ts); absent from an acpmux before operators. */
+  parsed?: ParsedQuery;
 };
 
 export type IndexWindow = { fromMs: number; toMs: number };
 
-export type IndexSearch = { query: string; window?: IndexWindow; limit: number; offset?: number };
+/** One ask of the index: the bar's raw text (the daemon parses its operators), whether case counts,
+ * and the local zone `since:today` is read in. */
+export type IndexSearch = {
+  query: string;
+  window?: IndexWindow;
+  limit: number;
+  offset?: number;
+  caseSensitive?: boolean;
+  tzOffsetMinutes?: number;
+};
 
 /** What the pane gives Find for the daemon's index of its chat (App.tsx, through ChatFindScope). */
 export type FindIndexSource = {
@@ -50,6 +62,9 @@ export type FindIndexSource = {
   rowsOfMessage?: (messageId: string) => readonly string[];
   /** Pages the transcript in until it holds `hit`; true once it does. */
   load: (hit: IndexHit) => Promise<boolean>;
+  /** The daemon's reading of a query and its operator suggestions (`_acpmux/search_syntax`);
+   * undefined when it has no syntax to ask (an acpmux before operators). */
+  syntax?: (ask: SyntaxAsk) => Promise<SyntaxAnswer | undefined>;
 };
 
 /** Hits per page, the daemon's most (transcript_search.rs MAX_LIMIT). */
@@ -64,8 +79,9 @@ export const INDEX_DEBOUNCE_MS = 150;
 const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 const str = (value: unknown) => (typeof value === "string" && value ? value : undefined);
 
-/** A daemon answer as Find reads it, oldest first (an acpmux before `order` answers newest first). */
-export function readAnswer(raw: unknown): IndexAnswer | undefined {
+/** A daemon answer as Find reads it, oldest first (an acpmux before `order` answers newest first);
+ * `query` checks the spans of the `parsed` it carries. */
+export function readAnswer(raw: unknown, query = ""): IndexAnswer | undefined {
   const hits = (raw as { hits?: unknown } | undefined)?.hits;
   if (!Array.isArray(hits)) return undefined;
   const read: IndexHit[] = [];
@@ -85,7 +101,8 @@ export function readAnswer(raw: unknown): IndexAnswer | undefined {
     });
   }
   const total = num((raw as { total?: unknown }).total);
-  return { hits: read, ...(total !== undefined && { total }) };
+  const parsed = readParsed((raw as { parsed?: unknown }).parsed, query);
+  return { hits: read, ...(total !== undefined && { total }), ...(parsed && { parsed }) };
 }
 
 /** A hit's identity across answers. */
@@ -171,14 +188,22 @@ export function landedStep(
   }
   const after = local.find(({ step }) => step.at >= hit.at);
   if (after && after.step.at - hit.at < LANDED_WITHIN_MS) return after.index;
-  return local[nearestStep(local.map(({ step }) => step), hit.at)]!.index;
+  return local[
+    nearestStep(
+      local.map(({ step }) => step),
+      hit.at,
+    )
+  ]!.index;
 }
 
 /** A row draws up to this long after the line it came from was written (a reply's first chunk). */
 const LANDED_WITHIN_MS = 10 * 60_000;
 
 /** The time span of rows `ids` (the rows on screen), from `rows`. */
-export function rowsWindow(rows: readonly AcpmuxRow[], ids: readonly string[] | null | undefined): IndexWindow | undefined {
+export function rowsWindow(
+  rows: readonly AcpmuxRow[],
+  ids: readonly string[] | null | undefined,
+): IndexWindow | undefined {
   if (!ids?.length) return undefined;
   const wanted = new Set(ids);
   let fromMs = Infinity;

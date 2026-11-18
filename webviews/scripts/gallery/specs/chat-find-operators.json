@@ -1,0 +1,71 @@
+{
+  "envs": [
+    ["light", "none"],
+    ["dark", "none"]
+  ],
+  "shots": [
+    {
+      "name": "empty",
+      "entry": "agent-pane.chat-find-operators",
+      "variant": "empty",
+      "width": 640,
+      "height": 320,
+      "deviceScaleFactor": 2,
+      "arms": { "now": "" }
+    },
+    {
+      "name": "chips",
+      "entry": "agent-pane.chat-find-operators",
+      "variant": "chips",
+      "width": 640,
+      "height": 320,
+      "deviceScaleFactor": 2,
+      "arms": { "now": "" }
+    },
+    {
+      "name": "autocomplete",
+      "entry": "agent-pane.chat-find-operators",
+      "variant": "autocomplete",
+      "width": 640,
+      "height": 320,
+      "deviceScaleFactor": 2,
+      "arms": { "now": "" }
+    },
+    {
+      "name": "options",
+      "entry": "agent-pane.chat-find-operators",
+      "variant": "options",
+      "width": 640,
+      "height": 320,
+      "deviceScaleFactor": 2,
+      "arms": { "now": "" }
+    },
+    {
+      "name": "no-results",
+      "entry": "agent-pane.chat-find-operators",
+      "variant": "no-results",
+      "width": 640,
+      "height": 320,
+      "deviceScaleFactor": 2,
+      "arms": { "now": "" }
+    },
+    {
+      "name": "older-acpmux",
+      "entry": "agent-pane.chat-find-operators",
+      "variant": "older-acpmux",
+      "width": 640,
+      "height": 320,
+      "deviceScaleFactor": 2,
+      "arms": { "now": "" }
+    },
+    {
+      "name": "options-narrow",
+      "entry": "agent-pane.chat-find-operators",
+      "variant": "options",
+      "width": 360,
+      "height": 320,
+      "deviceScaleFactor": 2,
+      "arms": { "now": "" }
+    }
+  ]
+}

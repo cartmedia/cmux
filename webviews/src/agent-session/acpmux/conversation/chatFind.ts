@@ -45,11 +45,20 @@ import {
   type IndexHit,
 } from "./findIndex";
 import type { FindRevealValue } from "./findReveal";
+import {
+  findPattern,
+  localTzOffsetMinutes,
+  type FindPattern,
+  type ParsedQuery,
+  type SearchCompletion,
+  type SearchRole,
+} from "./searchSyntax";
 
 export { foldFind };
 
-/** One match: the `occurrence`th match of the query in row `rowIndex`. */
-export type FindMatch = { rowIndex: number; rowId: string; occurrence: number };
+/** One match: the `occurrence`th match of the query in row `rowIndex`; `term` is the query term it
+ * is when the query has several (searchSyntax.ts). */
+export type FindMatch = { rowIndex: number; rowId: string; occurrence: number; term?: string };
 
 export type FindMatchesCache = {
   needle: string;
@@ -227,33 +236,77 @@ function rowText(row: AcpmuxRow, look: PromptLook): string | undefined {
   return [...row.items.map(drawnText), ...row.items.map(diffText)].join("\n");
 }
 
-// Rows are immutable snapshots. Keep the assembled, case-folded search text by row identity so
-// typing a query does not rebuild every tool output and edit diff on every keystroke. A weak map
-// lets old transcript snapshots disappear as virtualization/history replacement releases them.
-// A prompt's text depends on how it draws (`PromptLook`), so the entry keeps the look it was read in.
-const searchableTextCache = new WeakMap<AcpmuxRow, { look: string; text: string | undefined }>();
+// Rows are immutable snapshots. Keep the assembled search text (as drawn, and case-folded) by row
+// identity so typing a query does not rebuild every tool output and edit diff on every keystroke. A
+// weak map lets old transcript snapshots disappear as virtualization/history replacement releases
+// them. A prompt's text depends on how it draws (`PromptLook`), so the entry keeps the look it was
+// read in.
+type Searchable = { look: string; raw: string | undefined; text: string | undefined };
+const searchableTextCache = new WeakMap<AcpmuxRow, Searchable>();
 
-function searchableText(row: AcpmuxRow, look: PromptLook, key: string): string | undefined {
+function searchable(row: AcpmuxRow, look: PromptLook, key: string): Searchable {
   const cached = searchableTextCache.get(row);
-  if (cached?.look === key) return cached.text;
+  if (cached?.look === key) return cached;
   const raw = rowText(row, look);
-  const text = raw === undefined ? undefined : foldFind(raw);
-  searchableTextCache.set(row, { look: key, text });
-  return text;
+  const entry = { look: key, raw, text: raw === undefined ? undefined : foldFind(raw) };
+  searchableTextCache.set(row, entry);
+  return entry;
 }
 
-/** Every match of `query` (case-insensitive) in the prompts, replies and work of `rows`, in order. */
+/** Who wrote a row, as the daemon's `from:` names it: a prompt, a reply (or a queued message), or
+ * the agent's work. */
+const rowRole = (row: AcpmuxRow): SearchRole =>
+  row.kind === "user" ? "user" : SEARCHED_KINDS.has(row.kind) ? "assistant" : "tool";
+
+/** A pattern from what a caller hands Find: a plain query is one literal, case-insensitive needle. */
+export const asPattern = (query: string | FindPattern): FindPattern =>
+  typeof query === "string" ? findPattern(query, undefined, false) : query;
+
+/** The needles of `pattern` as they compare against a text (folded unless case-sensitive). */
+const needlesOf = (pattern: FindPattern) =>
+  pattern.terms.map((term) => (pattern.caseSensitive ? term : foldFind(term))).filter(Boolean);
+
+/** Where `needles` are in `text`, in order, each place once: an overlap goes to the earlier one. */
+export function patternHits(text: string, needles: readonly string[]): { at: number; length: number; term: number }[] {
+  const hits: { at: number; length: number; term: number }[] = [];
+  for (const [term, needle] of needles.entries())
+    for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length))
+      hits.push({ at, length: needle.length, term });
+  if (needles.length < 2) return hits;
+  hits.sort((a, b) => a.at - b.at || b.length - a.length);
+  const kept: typeof hits = [];
+  for (const hit of hits) {
+    const last = kept[kept.length - 1];
+    if (!last || hit.at >= last.at + last.length) kept.push(hit);
+  }
+  return kept;
+}
+
+/** Whether `row` can match `pattern` by who wrote it and when (the daemon's `from:`, `since:` and
+ * `before:`), before its text is read. */
+const rowAdmitted = (row: AcpmuxRow, pattern: FindPattern) =>
+  (pattern.role === undefined || rowRole(row) === pattern.role) &&
+  (pattern.sinceMs === undefined || !row.at || row.at >= pattern.sinceMs) &&
+  (pattern.beforeMs === undefined || !row.at || row.at < pattern.beforeMs);
+
+/** Every match of `query` in the prompts, replies and work of `rows`, in order. A string matches as
+ * one case-insensitive needle; a pattern (searchSyntax.ts, the daemon's reading of the bar's text)
+ * matches in a row that holds every term and no excluded one, of its role and time, at each term. */
 export function findMatchesIncremental(
   rows: readonly AcpmuxRow[],
-  query: string,
+  query: string | FindPattern,
   previous?: FindMatchesCache,
 ): FindMatchesResult {
-  const needle = foldFind(query);
+  const pattern = asPattern(query);
+  const needle = pattern.key;
   const look = promptLook();
   const key = lookKey(look);
-  if (!needle) {
+  const needles = needlesOf(pattern);
+  if (!needles.length) {
     return { matches: [], cache: { needle, look: key, rows, matches: [] }, scannedRows: 0 };
   }
+  const excluded = pattern.exclude.map((term) => (pattern.caseSensitive ? term : foldFind(term))).filter(Boolean);
+  const several = needles.length > 1;
 
   const same = previous?.needle === needle && previous.look === key;
   let prefix = 0;
@@ -268,16 +321,25 @@ export function findMatchesIncremental(
   const matches = same ? previous.matches.filter(({ rowIndex }) => rowIndex < prefix) : [];
   for (let rowIndex = prefix; rowIndex < rows.length; rowIndex += 1) {
     const row = rows[rowIndex];
-    const text = searchableText(row, look, key);
+    if (!rowAdmitted(row, pattern)) continue;
+    const read = searchable(row, look, key);
+    const text = pattern.caseSensitive ? read.raw : read.text;
     if (!text) continue;
+    if (excluded.some((term) => text.includes(term))) continue;
+    if (several && !needles.every((each) => text.includes(each))) continue;
     let occurrence = 0;
-    for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length))
-      matches.push({ rowIndex, rowId: row.id, occurrence: occurrence++ });
+    for (const hit of patternHits(text, needles))
+      matches.push({
+        rowIndex,
+        rowId: row.id,
+        occurrence: occurrence++,
+        ...(several && { term: pattern.terms[hit.term] }),
+      });
   }
   return { matches, cache: { needle, look: key, rows, matches }, scannedRows: rows.length - prefix };
 }
 
-export function findMatches(rows: readonly AcpmuxRow[], query: string): FindMatch[] {
+export function findMatches(rows: readonly AcpmuxRow[], query: string | FindPattern): FindMatch[] {
   return findMatchesIncremental(rows, query).matches;
 }
 
@@ -306,17 +368,39 @@ export type ChatFind = {
   /** Opens the bar on `query` with the match nearest `atMs` current (a `find:` reveal, findReveal.ts). */
   reveal: (find: FindRevealValue) => void;
   hide: () => void;
-  setQuery: (query: string) => void;
+  /** `cursor` is the caret in the new text (its end when left out), for the operator suggestions. */
+  setQuery: (query: string, cursor?: number) => void;
   next: () => void;
   previous: () => void;
   /** Changes on each `show`, so the bar focuses its field again. */
   focusRequest: number;
+  /** What the loaded rows are matched with: the daemon's reading of `query` (searchSyntax.ts), or
+   * the text as one needle until it has answered or where it cannot (also when left out). */
+  pattern?: FindPattern;
+  /** The search operators, while the daemon reads them (`_acpmux/search_syntax`); undefined with an
+   * acpmux that predates them, and the bar is as it was. */
+  syntax?: FindSyntax;
+};
+
+/** The search operators' state the bar draws (ChatFindBar: the Aa toggle, the options row, the
+ * chips and the operator suggestions). */
+export type FindSyntax = {
+  caseSensitive: boolean;
+  setCaseSensitive: (caseSensitive: boolean) => void;
+  /** The daemon's reading of the current query; undefined until it answers for this text. */
+  parsed?: ParsedQuery;
+  /** Operators for the token at the caret, for the current query and caret. */
+  completions: readonly SearchCompletion[];
+  /** Where the caret is in the field (UTF-16): suggestions are for the token it is in. */
+  setCursor: (cursor: number) => void;
+  /** The query and the caret, together, as a chip's removal or a suggestion leaves them. */
+  edit: (query: string, cursor?: number) => void;
 };
 
 /** What a find bar (ChatFindBar) reads: the chat's find, or another view's (the changes view). */
 export type FindBarState = Omit<
   ChatFind,
-  "matches" | "position" | "total" | "busy" | "pending" | "index" | "reveal"
+  "matches" | "position" | "total" | "busy" | "pending" | "index" | "reveal" | "pattern"
 > & {
   matches: readonly unknown[];
   /** Where the reader is among `total`, when that counts more than `matches` (the transcript index). */
@@ -331,7 +415,22 @@ export type FindBarState = Omit<
 const NO_MATCHES: FindMatch[] = [];
 const NO_HITS: IndexHit[] = [];
 
-type IndexAnswerState = { key: string; hits: IndexHit[]; phase: "window" | "whole" | "absent" };
+type IndexAnswerState = {
+  key: string;
+  query: string;
+  hits: IndexHit[];
+  phase: "window" | "whole" | "absent";
+  parsed?: ParsedQuery;
+};
+const NO_COMPLETIONS: readonly SearchCompletion[] = [];
+/** The daemon's newest reading: of which text, at which caret. */
+type SyntaxRead = {
+  key: string;
+  query: string;
+  cursor: number;
+  parsed: ParsedQuery;
+  completions: readonly SearchCompletion[];
+};
 
 /** The newest of `hits` (an acpmux before `order` answers newest first). */
 const newestHit = (hits: readonly IndexHit[]) =>
@@ -352,51 +451,107 @@ export function useChatFind(rows: readonly AcpmuxRow[], index?: FindIndexSource)
   // The hit whose turn is paging in.
   const [loading, setLoading] = useState<string>();
   const matchesCache = useRef<FindMatchesCache | undefined>(undefined);
+  const indexNow = useRef(index);
+  indexNow.current = index;
+  // The search operators (searchSyntax.ts): the daemon reads the text (`_acpmux/search_syntax`) once
+  // typing settles, and its newest answer for this text and caret is the one drawn; an older ask's
+  // answer is dropped. `served` is whether it reads them at all: undefined until it first answers,
+  // false for an acpmux without the method, and then the bar is as it was.
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [cursor, setCursor] = useState(0);
+  const [served, setServed] = useState<boolean>();
+  const [syntaxRead, setSyntaxRead] = useState<SyntaxRead>();
+  const syntaxAsk = open && index?.syntax ? `${index.key}\u0000${cursor}\u0000${query}` : undefined;
+  useEffect(() => {
+    const ask = indexNow.current?.syntax;
+    if (!syntaxAsk || !ask) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      void ask({ query, cursor, tzOffsetMinutes: localTzOffsetMinutes() })
+        .catch(() => undefined)
+        .then((answer) => {
+          if (!live) return;
+          if (!answer) return setServed((was) => (was ? was : false));
+          setServed(true);
+          setSyntaxRead({ key: syntaxAsk, query, cursor, parsed: answer.parsed, completions: answer.completions });
+        });
+    }, INDEX_DEBOUNCE_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one ask per text and caret
+  }, [syntaxAsk]);
+  const operators = served === true && open;
+  // The reading for this text: the syntax answer's, else the index's (it answers `parsed` too).
+  const indexParsed = answer?.parsed && answer.query === query ? answer.parsed : undefined;
+  const parsedNow = syntaxRead?.query === query ? syntaxRead.parsed : indexParsed;
+  // While a newer text is being read, the last reading stands, so the highlights do not fall back
+  // to the raw text between two keystrokes (its chips are not drawn: their spans are another text's).
+  const parsedMatched = parsedNow ?? (query ? syntaxRead?.parsed : undefined);
+  const pattern = useMemo(
+    () => (operators ? findPattern(query, parsedMatched, caseSensitive) : findPattern(query, undefined, false)),
+    [operators, query, parsedMatched, caseSensitive],
+  );
+  const completions =
+    operators && syntaxRead && syntaxRead.query === query && syntaxRead.cursor === cursor
+      ? syntaxRead.completions
+      : NO_COMPLETIONS;
   // While Find is open the pane draws every output update (ChatFindScope.tsx); a running
   // command's output from before it opened is in liveToolOutput.ts, not `rows`.
   const searched = useMemo(() => (open ? rowsWithLiveOutput(rows) : rows), [open, rows]);
   const matches = useMemo(() => {
     if (!open) return NO_MATCHES;
-    const result = findMatchesIncremental(searched, query, matchesCache.current);
+    const result = findMatchesIncremental(searched, pattern, matchesCache.current);
     matchesCache.current = result.cache;
     return result.matches;
-  }, [open, searched, query]);
+  }, [open, searched, pattern]);
   const rowsNow = useRef(searched);
   rowsNow.current = searched;
-  const indexNow = useRef(index);
-  indexNow.current = index;
   // Two asks per query once typing settles: the rows on screen first (`window`), drawn at once, then
   // the whole chat, page by page until a page's newest hit is loaded (the rest are newer still).
-  // A newer query or another chat drops what an older ask answers.
-  const searchKey = open && index && foldFind(query).trim() ? `${index.key}\u0000${query}` : undefined;
+  // A newer query or another chat drops what an older ask answers. The daemon reads the raw text's
+  // operators itself; case counts only where it reads them.
+  const exact = operators && caseSensitive;
+  const searchKey =
+    open && index && foldFind(query).trim() ? `${index.key}\u0000${exact ? "C" : "c"}\u0000${query}` : undefined;
   useEffect(() => {
     const source = indexNow.current;
     if (!searchKey || !source) return;
     let live = true;
+    // The local zone, where the daemon can read operators (`since:today` is a local midnight).
+    const asked = {
+      query,
+      ...(exact && { caseSensitive: true }),
+      ...(source.syntax && { tzOffsetMinutes: localTzOffsetMinutes() }),
+    };
     const timer = setTimeout(() => {
       void (async () => {
         const window = source.window?.();
         if (window) {
-          const first = await source.search({ query, window, limit: WINDOW_PAGE }).catch(() => undefined);
+          const first = await source.search({ ...asked, window, limit: WINDOW_PAGE }).catch(() => undefined);
           if (!live) return;
-          if (first) setAnswer({ key: searchKey, hits: mergeHits(first.hits), phase: "window" });
+          if (first)
+            setAnswer({ key: searchKey, query, hits: mergeHits(first.hits), phase: "window", parsed: first.parsed });
         }
         let hits: IndexHit[] = [];
+        let parsed: ParsedQuery | undefined;
         for (let page = 0; page < INDEX_PAGES; page++) {
           const read = await source
-            .search({ query, limit: INDEX_PAGE, ...(page > 0 && { offset: page * INDEX_PAGE }) })
+            .search({ ...asked, limit: INDEX_PAGE, ...(page > 0 && { offset: page * INDEX_PAGE }) })
             .catch(() => undefined);
           if (!live) return;
           if (!read) {
-            if (page === 0) return setAnswer({ key: searchKey, hits: [], phase: "absent" });
+            if (page === 0) return setAnswer({ key: searchKey, query, hits: [], phase: "absent" });
             break;
           }
+          parsed ??= read.parsed;
           hits = mergeHits(hits, read.hits);
           const newest = newestHit(read.hits);
           const counted = read.total !== undefined && (page + 1) * INDEX_PAGE >= read.total;
           if (read.hits.length < INDEX_PAGE || counted || !newest || hitLoaded(newest, rowsNow.current, source)) break;
         }
-        setAnswer({ key: searchKey, hits, phase: "whole" });
+        setAnswer({ key: searchKey, query, hits, phase: "whole", parsed });
       })();
     }, INDEX_DEBOUNCE_MS);
     return () => {
@@ -474,6 +629,7 @@ export function useChatFind(rows: readonly AcpmuxRow[], index?: FindIndexSource)
     setOpen(true);
     if (text) {
       setQueryState(text);
+      setCursor(text.length);
       setCurrentKey(undefined);
       setNear(undefined);
     }
@@ -495,11 +651,27 @@ export function useChatFind(rows: readonly AcpmuxRow[], index?: FindIndexSource)
     const fromBar = !focused || focused === document.body || focused.closest(".acpmux-find");
     if (fromBar && target?.isConnected) target.focus({ preventScroll: true });
   }, []);
-  const setQuery = useCallback((next: string) => {
+  const setQuery = useCallback((next: string, at?: number) => {
     setQueryState(next);
+    // The caret goes with the text, so the first ask for it already has the right token, even
+    // before the bar has learned the daemon reads operators (and starts following the caret).
+    setCursor(at ?? next.length);
     setCurrentKey(undefined);
     setNear(undefined);
   }, []);
+  const edit = useCallback(
+    (next: string, at?: number) => {
+      setQuery(next, at);
+    },
+    [setQuery],
+  );
+  const syntax = useMemo<FindSyntax | undefined>(
+    () =>
+      operators
+        ? { caseSensitive, setCaseSensitive, ...(parsedNow && { parsed: parsedNow }), completions, setCursor, edit }
+        : undefined,
+    [operators, caseSensitive, parsedNow, completions, edit],
+  );
   // From the steps of this render (a ref), so the callbacks keep their identity as rows stream in.
   const step = useCallback((by: number) => {
     const { steps: all, position: at } = stepsNow.current;
@@ -533,6 +705,8 @@ export function useChatFind(rows: readonly AcpmuxRow[], index?: FindIndexSource)
       next,
       previous,
       focusRequest,
+      pattern,
+      ...(syntax && { syntax }),
     }),
     [
       open,
@@ -551,6 +725,8 @@ export function useChatFind(rows: readonly AcpmuxRow[], index?: FindIndexSource)
       next,
       previous,
       focusRequest,
+      pattern,
+      syntax,
     ],
   );
 }
@@ -673,6 +849,34 @@ function nodeAt(nodes: readonly Node[], at: number, end: boolean): [Node, number
   return [nodes[0]!, 0];
 }
 
+/** Whether `pattern` keeps some rows out by more than their text holding a term: who wrote them,
+ * when, what they must not hold, or several terms that must all be there. */
+export const patternFilters = (pattern: FindPattern) =>
+  pattern.role !== undefined ||
+  pattern.sinceMs !== undefined ||
+  pattern.beforeMs !== undefined ||
+  pattern.exclude.length > 0 ||
+  pattern.terms.length > 1;
+
+/** The ids of the drawn rows (`drawn`, the transcript's) that hold one of `matches`: the row, its
+ * fold copy, a run that absorbed it, or the edited-files card that merges it; and the matches' own
+ * rows (a member row drawn inside a group carries its own id). paintFindHighlights paints only these
+ * when the pattern filters rows, so a prompt does not light up under `from:agent`. */
+export function findPaintRows(drawn: readonly AcpmuxRow[], matches: readonly FindMatch[]): Set<string> {
+  const ids = new Set(matches.map((match) => match.rowId));
+  const rows = new Set(ids);
+  for (const row of drawn) {
+    if (
+      ids.has(row.id) ||
+      ids.has(row.id.replace(/:fold$/, "")) ||
+      row.joined?.some((id) => ids.has(id)) ||
+      row.merged?.some((id) => ids.has(id))
+    )
+      rows.add(row.id);
+  }
+  return rows;
+}
+
 /** Clears the find highlights. */
 export function clearFindHighlights() {
   const highlights = registry();
@@ -699,19 +903,25 @@ export function findSkipped(element: Element | null | undefined): boolean {
 
 export function paintFindHighlights(
   root: HTMLElement,
-  query: string,
+  query: string | FindPattern,
   active?: { rowId: string; card: boolean; occurrence: number },
+  /** The drawn rows that may hold a match (findPaintRows), where the pattern filters rows by who
+   * wrote them, when, or what they must not hold; every row when absent. */
+  only?: ReadonlySet<string>,
 ): Range | undefined {
   const highlights = registry();
   const Highlight = (globalThis as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
-  const needle = foldFind(query);
-  if (!highlights || !Highlight || !needle) {
+  const pattern = asPattern(query);
+  const needles = needlesOf(pattern);
+  const fold = pattern.caseSensitive ? (text: string) => text : foldFind;
+  if (!highlights || !Highlight || !needles.length) {
     clearFindHighlights();
     return undefined;
   }
   const all: Range[] = [];
   let current: Range | undefined;
   for (const row of root.querySelectorAll<HTMLElement>("[data-row-id]")) {
+    if (only && !only.has(row.dataset.rowId ?? "")) continue;
     // Alternate presentations share one indexed value. Prefer Markdown only when its light-DOM
     // ranges cover every Raw occurrence of this query. Otherwise use Raw for the whole value:
     // mixing copies by ordinal would misidentify a hidden URL preceding a visible occurrence.
@@ -736,11 +946,11 @@ export function paintFindHighlights(
       const pair = presentation?.dataset.findPrimary ?? presentation?.dataset.findFallback;
       const kind = presentation?.hasAttribute("data-find-primary") ? "primary" : "fallback";
       const counts = pair === undefined ? undefined : alternatives.get(pair);
-      const text = foldFind(nodes.map((node) => node.textContent ?? "").join(""));
-      for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length)) {
+      const text = fold(nodes.map((node) => node.textContent ?? "").join(""));
+      for (const { at, length } of patternHits(text, needles)) {
         const range = document.createRange();
         const [startNode, startAt] = nodeAt(nodes, at, false);
-        const [endNode, endAt] = nodeAt(nodes, at + needle.length, true);
+        const [endNode, endAt] = nodeAt(nodes, at + length, true);
         range.setStart(startNode, startAt);
         range.setEnd(endNode, endAt);
         if (counts) counts[kind]++;
