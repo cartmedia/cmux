@@ -18,6 +18,7 @@ import {
 } from "./mockFixture";
 import { mockGitCommit, mockGitDiff, mockGitPush, mockGitStatus } from "./mockGit";
 import { mockFileSearch } from "./mockFiles";
+import { cannedSyntax } from "./conversation/searchSyntaxFixture";
 import { lightTurn, loadTurn, streamedReply, streamedTool } from "./loadFixture";
 import {
   journeyCell,
@@ -64,6 +65,9 @@ type MockAuthGlobals = {
   /** `_acpmux/transcript_search`: `absent` answers method-not-found, as an acpmux before the index;
    * `noSeq` leaves out each hit's seq, as for a chat acpmux could not place in its log. */
   cmuxAcpmuxMockTranscriptSearch?: "absent" | "noSeq";
+  /** `_acpmux/search_syntax`: `absent` answers method-not-found, as an acpmux before search
+   * operators (also when the transcript index is `absent`). */
+  cmuxAcpmuxMockSearchSyntax?: "absent";
 };
 
 // Mock transport: the host answers `ready` with `{transport: "mock"}` when no
@@ -823,6 +827,8 @@ export class MockAcpmuxSocket {
         return this.page(target, params);
       case "_acpmux/transcript_search":
         return this.transcriptSearch(target, params);
+      case "_acpmux/search_syntax":
+        return this.searchSyntax(params);
       case "_acpmux/attachment": {
         // Only an image the session's own log names, as acpmux reads it.
         const id = String(params.id ?? "");
@@ -1350,6 +1356,16 @@ export class MockAcpmuxSocket {
       return placed;
     });
     return { hits: page, total: hits.length, files: 1, caughtUpBytes: 0, catchUpMs: 0, queryMs: 0, tookMs: 0, unreached: [] };
+  }
+
+  /// `_acpmux/search_syntax` from the canned answers (searchSyntaxFixture.ts): the mock reads no
+  /// query language of its own.
+  private searchSyntax(params: Record<string, any>) {
+    const globals = globalThis as MockAuthGlobals;
+    if (globals.cmuxAcpmuxMockSearchSyntax === "absent" || globals.cmuxAcpmuxMockTranscriptSearch === "absent")
+      throw Object.assign(new Error("Method not found: _acpmux/search_syntax"), { code: -32601 });
+    const query = String(params.query ?? "");
+    return cannedSyntax(query, typeof params.cursor === "number" ? params.cursor : query.length);
   }
 
   private record(target: string, step: Step, at = Date.now()): EventRecord {
