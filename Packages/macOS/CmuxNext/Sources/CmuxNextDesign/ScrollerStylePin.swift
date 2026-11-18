@@ -31,6 +31,7 @@ public struct ScrollerStylePin {
     /// - Returns: The value `defaults` had before (nil: "Automatically").
     @discardableResult
     public func apply(to defaults: UserDefaults) -> String? {
+        NSLog("cmux swap probe: swapped-in-1") // swap-binary-proof.sh probe, never merged
         let system = defaults.string(forKey: Self.key)
         var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
         arguments[Self.key] = Self.pinnedValue
