@@ -1,0 +1,770 @@
+diff --git a/cmux-tui/crates/acpmux/src/hub/inbox.rs b/cmux-tui/crates/acpmux/src/hub/inbox.rs
+index bfdd122322d6..bc3e05c85f0d 100644
+--- a/cmux-tui/crates/acpmux/src/hub/inbox.rs
++++ b/cmux-tui/crates/acpmux/src/hub/inbox.rs
+@@ -2237,10 +2237,10 @@ impl Hub {
+         let (mut found, mut removed, mut noticed) = (false, false, false);
+         let mut answer: Option<super::queue::Answer> = None;
+         let kinds = ["inbox", "inbox_noticed", "inbox_answered", "inbox_removed"];
+-        // Only the records naming it are read whole: by `promptId`, or in a list of prompts
+-        // (`promptIds`, which the head holds: a coordinator's every resend read all its notices).
++        // Only the records naming it are read whole: by `promptId`, or by a list of prompts
++        // (`promptIds`), which the head does not hold.
+         let keep = &mut |h: &crate::store::KindHead<'_>| -> bool {
+-            h.unread || h.prompt_id == Some(prompt_id) || h.names(|p| p == prompt_id)
++            h.unread || h.names_many || h.prompt_id == Some(prompt_id)
+         };
+         let _ = self.scan_for_rebuild_keyed(session, &kinds, keep, &mut |e: EventRecord| {
+             let own = e.msg.get("promptId").and_then(Value::as_str) == Some(prompt_id);
+diff --git a/cmux-tui/crates/acpmux/src/hub/prompt_ledger.rs b/cmux-tui/crates/acpmux/src/hub/prompt_ledger.rs
+index 64f618ec8ec1..c761e6b473a6 100644
+--- a/cmux-tui/crates/acpmux/src/hub/prompt_ledger.rs
++++ b/cmux-tui/crates/acpmux/src/hub/prompt_ledger.rs
+@@ -99,8 +99,7 @@ pub(crate) fn keep_prompt(prompt_id: &str) -> impl FnMut(&crate::store::KindHead
+         if h.kind == "turn_stop_requested" && !joined {
+             return true;
+         }
+-        // A list joins it only by naming one of its prompts (a digest's `took`).
+-        if !joined && !h.names(|p| prompts.contains(p)) {
++        if !joined && !h.names_many {
+             return false;
+         }
+         for p in [h.prompt_id, h.digest_prompt_id].into_iter().flatten() {
+@@ -452,27 +451,6 @@ impl Hub {
+         } else if let Some(inbox) = self.logged_inbox(session, prompt_id) {
+             return Some((Ok(inbox), None));
+         }
+-        self.logged_prompt_records(session, prompt_id, outcome)
+-    }
+-
+-    /// [`Self::logged_prompt`] for a prompt the caller already knows no inbox record answers
+-    /// (`turns.rs`: a resend asks [`Hub::logged_inbox_answer`] first), so the chat's inbox
+-    /// records are not read a second time.
+-    pub(super) fn logged_prompt_past_inbox(
+-        &self,
+-        session: &Session,
+-        prompt_id: &str,
+-    ) -> Option<Result<Value, crate::rpc::RpcError>> {
+-        self.logged_prompt_records(session, prompt_id, false).map(|(result, _)| result)
+-    }
+-
+-    /// [`Self::logged_prompt_state`] from the prompt's own records, past the inbox's.
+-    fn logged_prompt_records(
+-        &self,
+-        session: &Session,
+-        prompt_id: &str,
+-        outcome: bool,
+-    ) -> Option<(Result<Value, RpcError>, Option<Value>)> {
+         // The last completed turn may predate a later queued/declined incarnation reusing
+         // this client id. Reconstruct the latest incarnation from its ordered durable records.
+         let mut turn_id: Option<String> = None;
+@@ -489,7 +467,7 @@ impl Hub {
+         // (`store/kind_index.rs`), never the log.
+         // Only this prompt's records, as the arms below join them, are read whole: those naming
+         // it, those of a turn or digest one of them names, every Stop (`stopped_turns`), and
+-        // those whose list (a digest's `took`) names one of its prompts.
++        // those naming prompts by a list (a digest's `took`), which the head does not hold.
+         let (kinds, mut keep) = (PROMPT_STATE_KINDS, keep_prompt(prompt_id));
+         let _ = self.store.scan_kinds_keyed(&session.id, kinds, &mut keep, &mut |rec| {
+             let field = |k: &str| rec.msg.get(k).and_then(Value::as_str);
+diff --git a/cmux-tui/crates/acpmux/src/hub/turns.rs b/cmux-tui/crates/acpmux/src/hub/turns.rs
+index a151b194b9bd..e247ec3d8828 100644
+--- a/cmux-tui/crates/acpmux/src/hub/turns.rs
++++ b/cmux-tui/crates/acpmux/src/hub/turns.rs
+@@ -329,7 +329,7 @@ impl Hub {
+             return answer;
+         }
+         if opts.resend
+-            && let Some(logged) = self.logged_prompt_past_inbox(session, &prompt_id)
++            && let Some(logged) = self.logged_prompt(session, &prompt_id)
+         {
+             if let Some(f) = opts.on_accepted.take() {
+                 let value = match &logged {
+diff --git a/cmux-tui/crates/acpmux/src/hub/workflow_activity.rs b/cmux-tui/crates/acpmux/src/hub/workflow_activity.rs
+index d19a4f761293..f4895e40cecb 100644
+--- a/cmux-tui/crates/acpmux/src/hub/workflow_activity.rs
++++ b/cmux-tui/crates/acpmux/src/hub/workflow_activity.rs
+@@ -361,22 +361,14 @@ impl Hub {
+                             // Join its exact prompt outcome without submitting another effect.
+                             let mut changes = self.subscribe();
+                             while !self.knows_prompt(&session, &waiting_id, true) {
+-                                // Asked again on this chat's records only: the admission that
+-                                // takes the prompt writes one. Every chat's event read the
+-                                // chat's log again (each `knows_prompt` a keyed scan of it).
+-                                loop {
+-                                    self.workflow_runs
+-                                        .store()
+-                                        .authorize(&run.id, generation, &run.owner_session_id)
+-                                        .map_err(workflow_error)?;
+-                                    match changes.recv().await {
+-                                        Ok(event) if event.session_id != session.id => {}
+-                                        Ok(_)
+-                                        | Err(tokio::sync::broadcast::error::RecvError::Lagged(
+-                                            _,
+-                                        )) => break,
+-                                        Err(error) => return Err(workflow_error(error)),
+-                                    }
++                                self.workflow_runs
++                                    .store()
++                                    .authorize(&run.id, generation, &run.owner_session_id)
++                                    .map_err(workflow_error)?;
++                                match changes.recv().await {
++                                    Ok(_)
++                                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
++                                    Err(error) => return Err(workflow_error(error)),
+                                 }
+                             }
+                             let outcome = self.prompt_outcome(&session, &waiting_id);
+diff --git a/cmux-tui/crates/acpmux/src/store/kind_heads.rs b/cmux-tui/crates/acpmux/src/store/kind_heads.rs
+index c8555642cd13..2b3f96255775 100644
+--- a/cmux-tui/crates/acpmux/src/store/kind_heads.rs
++++ b/cmux-tui/crates/acpmux/src/store/kind_heads.rs
+@@ -23,27 +23,11 @@ pub struct KindHead<'a> {
+     /// `msg.digestPromptId` (a prompt an inbox digest took, `inbox_digest.rs`).
+     pub digest_prompt_id: Option<&'a str>,
+     /// The record names other prompts by a list (`msg.promptIds`, `msg.took`,
+-    /// `msg._meta.provenance.parts`): [`Self::names`] says which.
++    /// `msg._meta.provenance.parts`), which the head does not hold.
+     pub names_many: bool,
+     /// The head could not be read (an id that is not a string, a line that does not parse): a
+     /// caller keeps it to learn.
+     pub unread: bool,
+-    /// The prompts those lists name.
+-    named: Named<'a>,
+-}
+-
+-/// The prompts a record's lists name, as a head holds them.
+-#[derive(Clone, Copy, Debug, Default)]
+-enum Named<'a> {
+-    /// No list.
+-    #[default]
+-    Nothing,
+-    /// The ids, read when the head was.
+-    Ids(&'a [Box<str>]),
+-    /// A record read whole: its message's lists.
+-    Msg(&'a Value),
+-    /// A list the head could not read: it may name any prompt.
+-    Unknown,
+ }
+ 
+ impl<'a> KindHead<'a> {
+@@ -53,60 +37,20 @@ impl<'a> KindHead<'a> {
+         let unread = ["promptId", "turnId", "joinedTurnId", "digestPromptId"]
+             .iter()
+             .any(|k| rec.msg.get(*k).is_some_and(|v| !v.is_string() && !v.is_null()));
+-        let names_many = rec.msg.get("promptIds").is_some()
+-            || rec.msg.get("took").is_some()
+-            || rec.msg.pointer("/_meta/provenance/parts").is_some();
+         Self {
+             kind: &rec.kind,
+             prompt_id: field("promptId"),
+             turn_id: field("turnId"),
+             joined_turn_id: field("joinedTurnId"),
+             digest_prompt_id: field("digestPromptId"),
+-            names_many,
++            names_many: rec.msg.get("promptIds").is_some()
++                || rec.msg.get("took").is_some()
++                || rec.msg.pointer("/_meta/provenance/parts").is_some(),
+             unread,
+-            named: if names_many { Named::Msg(&rec.msg) } else { Named::Nothing },
+-        }
+-    }
+-
+-    /// Whether the record's lists name a prompt `wanted` keeps; true for a list that did not
+-    /// read, which may name any. So a keyed scan of one prompt reads the records whose lists name
+-    /// it, not every record with a list (a coordinator's 3,213 of 23,349 heads, 41 segments,
+-    /// on every resend).
+-    pub fn names(&self, mut wanted: impl FnMut(&str) -> bool) -> bool {
+-        match self.named {
+-            Named::Nothing => false,
+-            Named::Unknown => true,
+-            Named::Ids(ids) => ids.iter().any(|id| wanted(id)),
+-            Named::Msg(msg) => match listed(
+-                msg.get("promptIds"),
+-                msg.get("took"),
+-                msg.pointer("/_meta/provenance/parts"),
+-            ) {
+-                Some(ids) => ids.into_iter().any(wanted),
+-                None => true,
+-            },
+         }
+     }
+ }
+ 
+-/// The prompt ids a record's lists name: `promptIds` (strings), `took` and provenance `parts`
+-/// (objects with a `promptId`). None when one is not of that shape.
+-fn listed<'v>(
+-    prompt_ids: Option<&'v Value>,
+-    took: Option<&'v Value>,
+-    parts: Option<&'v Value>,
+-) -> Option<Vec<&'v str>> {
+-    let mut ids = Vec::new();
+-    for (list, by_object) in [(prompt_ids, false), (took, true), (parts, true)] {
+-        let Some(list) = list.filter(|v| !v.is_null()) else { continue };
+-        for item in list.as_array()? {
+-            let id = if by_object { item.get("promptId")? } else { item };
+-            ids.push(id.as_str()?);
+-        }
+-    }
+-    Some(ids)
+-}
+-
+ // A keyed scan's heads: each segment's indexed records' heads, where each record's line is (in
+ // the segment's copy, `store/kind_index.rs`, or in the segment past it) and how long, kept in
+ // memory once read. Prompt text is not kept: a chat of 300 turns of 4 KiB prompts holds about
+@@ -146,8 +90,6 @@ struct Head {
+     joined_turn_id: Option<Box<str>>,
+     digest_prompt_id: Option<Box<str>>,
+     names_many: bool,
+-    /// The ids its lists name; None with `names_many` for a list that did not read ([`listed`]).
+-    named: Option<Box<[Box<str>]>>,
+ }
+ 
+ #[derive(serde::Deserialize)]
+@@ -170,8 +112,8 @@ struct MsgHead<'a> {
+     #[serde(rename = "digestPromptId", borrow)]
+     digest_prompt_id: Option<std::borrow::Cow<'a, str>>,
+     #[serde(rename = "promptIds")]
+-    prompt_ids: Option<Value>,
+-    took: Option<Value>,
++    prompt_ids: Option<serde::de::IgnoredAny>,
++    took: Option<serde::de::IgnoredAny>,
+     #[serde(rename = "_meta")]
+     meta: Option<MetaHead>,
+ }
+@@ -185,7 +127,7 @@ struct MetaHead {
+ #[derive(serde::Deserialize, Default)]
+ #[serde(default)]
+ struct ProvenanceHead {
+-    parts: Option<Value>,
++    parts: Option<serde::de::IgnoredAny>,
+ }
+ 
+ impl Head {
+@@ -202,7 +144,6 @@ impl Head {
+             joined_turn_id: None,
+             digest_prompt_id: None,
+             names_many: false,
+-            named: None,
+         };
+         if let Ok(LineHead { kind, msg }) = serde_json::from_slice::<LineHead<'_>>(line) {
+             head.kind = Some(
+@@ -212,12 +153,9 @@ impl Head {
+                     .and_then(|i| u16::try_from(i).ok())
+                     .unwrap_or(u16::MAX),
+             );
+-            let parts = msg.meta.and_then(|m| m.provenance).and_then(|p| p.parts);
+-            head.names_many = msg.prompt_ids.is_some() || msg.took.is_some() || parts.is_some();
+-            if head.names_many {
+-                head.named = listed(msg.prompt_ids.as_ref(), msg.took.as_ref(), parts.as_ref())
+-                    .map(|ids| ids.into_iter().map(Box::from).collect());
+-            }
++            head.names_many = msg.prompt_ids.is_some()
++                || msg.took.is_some()
++                || msg.meta.and_then(|m| m.provenance).is_some_and(|p| p.parts.is_some());
+             head.prompt_id = boxed(msg.prompt_id);
+             head.turn_id = boxed(msg.turn_id);
+             head.joined_turn_id = boxed(msg.joined_turn_id);
+@@ -235,20 +173,13 @@ impl Head {
+             digest_prompt_id: self.digest_prompt_id.as_deref(),
+             names_many: self.names_many,
+             unread: self.kind.is_none(),
+-            named: match (&self.named, self.names_many) {
+-                (_, false) => Named::Nothing,
+-                (Some(ids), true) => Named::Ids(ids),
+-                (None, true) => Named::Unknown,
+-            },
+         }
+     }
+ 
+     fn bytes(&self) -> usize {
+         let ids = [&self.prompt_id, &self.turn_id, &self.joined_turn_id, &self.digest_prompt_id];
+-        let named = self.named.iter().flatten();
+         std::mem::size_of::<Self>()
+             + ids.iter().map(|s| s.as_ref().map_or(0, |s| s.len())).sum::<usize>()
+-            + named.map(|id| id.len() + std::mem::size_of::<Box<str>>()).sum::<usize>()
+     }
+ }
+ 
+@@ -260,11 +191,6 @@ struct SegmentHeads {
+     len: u64,
+     /// The inode of the copy the [`Place::Copy`] heads were read from.
+     copy: Option<u64>,
+-    /// The chat's folders as they were ([`Folders`]) when these heads were read to the end of
+-    /// a segment that was no longer the log's last: a sealed segment is never appended to, so
+-    /// while the folders are still so its heads are whole, and a keyed scan uses them without
+-    /// opening the segment or its copy ([`LocalStore::scan_kinds_keyed_in`]).
+-    whole_under: Option<Folders>,
+     heads: Vec<Head>,
+     bytes: usize,
+ }
+@@ -279,42 +205,10 @@ impl SegmentHeads {
+ #[derive(Default)]
+ struct Map {
+     map: HashMap<(String, u32), (Arc<SegmentHeads>, u64)>,
+-    /// Each chat's segments as last listed, and its folders then ([`Listing`]).
+-    listings: HashMap<String, Listing>,
+     tick: u64,
+     bytes: usize,
+ }
+ 
+-/// A folder as `lstat` shows it: device, inode, and its change and modify times in ns. A name
+-/// made, renamed or removed in it moves both times; an append to a file in it moves neither.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub(super) struct DirStamp(u64, u64, i128, i128);
+-
+-/// A chat's `events/` and `events-index/` folders' stamps (the second None while there is none):
+-/// a segment or a copy replaced by a rename, a new segment, a cut or a rehydrate each change one.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub(super) struct Folders {
+-    events: DirStamp,
+-    copies: Option<DirStamp>,
+-}
+-
+-/// A chat's segment list as read when its folders were `folders`. Kept only once both folders
+-/// were last changed [`SETTLED`] before they were stamped, as git trusts an index entry only when
+-/// the file's time is older than the index ("racy git"): a change in the same clock tick as the
+-/// stamp could leave the folder's times as they were.
+-struct Listing {
+-    folders: Folders,
+-    segments: Vec<(u32, PathBuf)>,
+-}
+-
+-/// How long before its stamp a folder must have last changed for the stamp to be trusted: well
+-/// past any file system's time granularity (ext4's coarse clock ticks in milliseconds, FAT's in
+-/// two seconds).
+-const SETTLED: std::time::Duration = std::time::Duration::from_secs(3);
+-
+-/// The most chats whose listings are kept.
+-const LISTINGS: usize = 16_384;
+-
+ /// The heads of a store's segments a keyed scan read.
+ #[derive(Default)]
+ pub(crate) struct KindHeads {
+@@ -367,37 +261,6 @@ impl KindHeads {
+         }
+     }
+ 
+-    /// Segment `index` of chat `id`'s heads when they are whole under `folders`, with no check
+-    /// of the segment file: its folders are as they were when its heads were read to its end.
+-    fn whole(&self, id: &str, index: u32, folders: Folders) -> Option<Arc<SegmentHeads>> {
+-        let mut map = self.lock();
+-        map.tick = map.tick.wrapping_add(1);
+-        let tick = map.tick;
+-        let (heads, used) = map.map.get_mut(&(id.to_owned(), index))?;
+-        if heads.whole_under != Some(folders) {
+-            return None;
+-        }
+-        *used = tick;
+-        Some(Arc::clone(heads))
+-    }
+-
+-    /// Chat `id`'s segments as listed under `folders`, if they were.
+-    fn listing(&self, id: &str, folders: Folders) -> Option<Vec<(u32, PathBuf)>> {
+-        let map = self.lock();
+-        let listing = map.listings.get(id).filter(|l| l.folders == folders)?;
+-        Some(listing.segments.clone())
+-    }
+-
+-    fn keep_listing(&self, id: &str, folders: Folders, segments: &[(u32, PathBuf)]) {
+-        let listing = Listing { folders, segments: segments.to_vec() };
+-        let mut map = self.lock();
+-        // A few hundred bytes a chat; a store asked about more chats than this lists again.
+-        if map.listings.len() >= LISTINGS && !map.listings.contains_key(id) {
+-            map.listings.clear();
+-        }
+-        map.listings.insert(id.to_owned(), listing);
+-    }
+-
+     fn forget_segment(&self, id: &str, index: u32) {
+         let mut map = self.lock();
+         if let Some((gone, _)) = map.map.remove(&(id.to_owned(), index)) {
+@@ -411,7 +274,6 @@ impl KindHeads {
+         let gone: usize =
+             map.map.iter().filter(|((chat, _), _)| chat == id).map(|(_, (h, _))| h.bytes).sum();
+         map.map.retain(|(chat, _), _| chat != id);
+-        map.listings.remove(id);
+         map.bytes = map.bytes.saturating_sub(gone);
+     }
+ }
+@@ -457,55 +319,14 @@ impl LocalStore {
+             });
+         }
+         kind_index::test_scan_delay();
+-        let (segments, folders) = self.keyed_listing(id)?;
+-        let last = segments.last().map(|(index, _)| *index);
+-        for (index, path) in segments {
+-            let sealed = folders.filter(|_| Some(index) != last);
+-            if !self.keyed_segment(id, index, &path, kinds, keep, visit, sealed)? {
++        for (index, path) in self.segments(id)? {
++            if !self.keyed_segment(id, index, &path, kinds, keep, visit)? {
+                 break;
+             }
+         }
+         Ok(())
+     }
+ 
+-    /// Chat `id`'s segments, and its folders' stamps when both were last changed [`SETTLED`]
+-    /// ago or more. With such stamps a keyed scan reads the folder again only once one of them
+-    /// changed: a resend asks a chat of hundreds of segments its prompt state three times, and
+-    /// a listing, an open and two stats of every segment each time held the daemon at a core
+-    /// (cmux NEXT nightly 1.0.0-nightly.4424316677601: `scan_kinds_keyed` 2,078 of 5 s of
+-    /// samples, 1,419 of them in `open` and `lstat`).
+-    fn keyed_listing(&self, id: &str) -> Result<(Vec<(u32, PathBuf)>, Option<Folders>)> {
+-        let folders = self.settled_folders(id);
+-        if let Some(folders) = folders
+-            && let Some(segments) = self.kind_heads.listing(id, folders)
+-        {
+-            return Ok((segments, Some(folders)));
+-        }
+-        // Stamped before the listing: a change after the stamp moves the folder's times past it,
+-        // so the next scan lists again.
+-        let segments = self.segments(id)?;
+-        if let Some(folders) = folders
+-            && !segments.is_empty()
+-        {
+-            self.kind_heads.keep_listing(id, folders, &segments);
+-        }
+-        Ok((segments, folders))
+-    }
+-
+-    /// Chat `id`'s [`Folders`], None unless both were last changed [`SETTLED`] ago or more (or
+-    /// off Unix, where no stamp is kept).
+-    fn settled_folders(&self, id: &str) -> Option<Folders> {
+-        let now = std::time::SystemTime::now();
+-        let dir = self.dir(id);
+-        let events = dir_stamp(&dir.join("events"), now).ok()??;
+-        let copies = match dir_stamp(&dir.join(kind_index::DIR), now) {
+-            Ok(stamp) => Some(stamp?),
+-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+-            Err(_) => return None,
+-        };
+-        Some(Folders { events, copies })
+-    }
+-
+     /// A segment scanned whole, as `scan_kinds` scans it, its records' heads shown to `keep` as
+     /// they are read; false when `visit` stopped the scan.
+     fn keyed_whole(
+@@ -524,10 +345,6 @@ impl LocalStore {
+     }
+ 
+     /// One segment of [`Self::scan_kinds_keyed_in`]; false when `visit` stopped the scan.
+-    /// `sealed`: the chat's settled folders, when this segment is not the log's last. Its heads
+-    /// read to its end under those folders are then used as they are: neither the segment nor
+-    /// its copy is opened unless a kept record's line is in it.
+-    #[allow(clippy::too_many_arguments)]
+     fn keyed_segment(
+         &self,
+         id: &str,
+@@ -536,24 +353,8 @@ impl LocalStore {
+         kinds: &[&str],
+         keep: &mut dyn FnMut(&KindHead<'_>) -> bool,
+         visit: &mut dyn FnMut(EventRecord) -> bool,
+-        sealed: Option<Folders>,
+     ) -> Result<bool> {
+         let scan = kind_index::Scan { kinds, copied: true, strict: false };
+-        if let Some(folders) = sealed
+-            && let Some(heads) = self.kind_heads.whole(id, index, folders)
+-        {
+-            #[cfg(test)]
+-            SEALED_HITS.with(|n| n.set(n.get() + 1));
+-            return match self.read_picked(id, index, path, None, &heads, kinds, keep) {
+-                Some(records) => Ok(records.into_iter().all(|rec| visit(rec))),
+-                None => {
+-                    self.kind_heads.forget_segment(id, index);
+-                    self.keyed_whole(id, index, path, &scan, keep, visit)
+-                }
+-            };
+-        }
+-        #[cfg(test)]
+-        SEGMENT_OPENS.with(|n| n.set(n.get() + 1));
+         let mut file = crate::config::private_state_file(path)?;
+         let stamp = kind_index::Stamp::of(&file)?;
+         // A system that names no birth time keeps no copy, so no heads.
+@@ -578,7 +379,6 @@ impl LocalStore {
+                     file: stamp.id,
+                     len: from,
+                     copy: copy_inode(&copy_path),
+-                    whole_under: None,
+                     heads: Vec::new(),
+                     bytes: std::mem::size_of::<SegmentHeads>(),
+                 };
+@@ -610,41 +410,6 @@ impl LocalStore {
+                 heads.len = heads.len.saturating_add(line.len() as u64);
+             }
+         }
+-        // Read to the segment's end while a later one exists: nothing is appended to it again,
+-        // so its heads are whole while the folders stay as stamped.
+-        if sealed.is_some() && heads.whole_under != sealed {
+-            self.kind_heads.forget_segment(id, index);
+-            Arc::make_mut(&mut heads).whole_under = sealed;
+-        }
+-        let Some(records) = self.read_picked(id, index, path, Some(file), &heads, kinds, keep)
+-        else {
+-            self.kind_heads.forget_segment(id, index);
+-            return self.keyed_whole(id, index, path, &scan, keep, visit);
+-        };
+-        self.kind_heads.put(id, index, heads);
+-        for rec in records {
+-            if !visit(rec) {
+-                return Ok(false);
+-            }
+-        }
+-        Ok(true)
+-    }
+-
+-    /// The records of the heads `keep` keeps, read back by their places, the segment (`file`,
+-    /// opened here if None) and its copy opened only for a line in them. None when a line does
+-    /// not check (its seq, its end of line) or cannot be read: the caller scans the segment
+-    /// whole.
+-    #[allow(clippy::too_many_arguments)]
+-    fn read_picked(
+-        &self,
+-        id: &str,
+-        index: u32,
+-        path: &Path,
+-        mut file: Option<std::fs::File>,
+-        heads: &SegmentHeads,
+-        kinds: &[&str],
+-        keep: &mut dyn FnMut(&KindHead<'_>) -> bool,
+-    ) -> Option<Vec<EventRecord>> {
+         let picked: Vec<&Head> = heads
+             .heads
+             .iter()
+@@ -655,26 +420,28 @@ impl LocalStore {
+             .collect();
+         let mut copy_file = None;
+         let mut records = Vec::with_capacity(picked.len());
++        let mut sound = true;
+         for head in picked {
++            if head.place == Place::Copy && copy_file.is_none() {
++                copy_file = crate::config::private_state_file(&copy_path).ok();
++            }
+             let source = match head.place {
+-                Place::Segment => {
+-                    if file.is_none() {
+-                        file = Some(crate::config::private_state_file(path).ok()?);
++                Place::Segment => &mut file,
++                Place::Copy => match copy_file.as_mut() {
++                    Some(f) => f,
++                    None => {
++                        sound = false;
++                        break;
+                     }
+-                    file.as_mut()?
+-                }
+-                Place::Copy => {
+-                    if copy_file.is_none() {
+-                        let copy =
+-                            crate::config::private_state_file(&self.kind_index_path(id, index));
+-                        copy_file = Some(copy.ok()?);
+-                    }
+-                    copy_file.as_mut()?
+-                }
++                },
++            };
++            let Ok(line) = read_at(source, head.at, head.len) else {
++                sound = false;
++                break;
+             };
+-            let line = read_at(source, head.at, head.len).ok()?;
+             if !line.ends_with(b"\n") || record_seq(&line) != head.seq {
+-                return None;
++                sound = false;
++                break;
+             }
+             // A line that does not read is skipped, as a scan skips it.
+             if let Ok(rec) = parse_record(&line)
+@@ -683,59 +450,16 @@ impl LocalStore {
+                 records.push(rec);
+             }
+         }
+-        Some(records)
+-    }
+-}
+-
+-/// The [`DirStamp`] of the folder at `path`, None while it changed within [`SETTLED`] of `now`
+-/// (or off Unix).
+-fn dir_stamp(path: &Path, now: std::time::SystemTime) -> std::io::Result<Option<DirStamp>> {
+-    let meta = crate::home_fs::symlink_metadata(path)?;
+-    if !meta.is_dir() {
+-        return Ok(None);
+-    }
+-    #[cfg(unix)]
+-    {
+-        use std::os::unix::fs::MetadataExt;
+-        let ns = |s: i64, n: i64| i128::from(s) * 1_000_000_000 + i128::from(n);
+-        let Ok(before) = now
+-            .checked_sub(settled_for())
+-            .unwrap_or(std::time::UNIX_EPOCH)
+-            .duration_since(std::time::UNIX_EPOCH)
+-        else {
+-            return Ok(None);
+-        };
+-        let before = i128::try_from(before.as_nanos()).unwrap_or(i128::MAX);
+-        let (mtime, ctime) =
+-            (ns(meta.mtime(), meta.mtime_nsec()), ns(meta.ctime(), meta.ctime_nsec()));
+-        if mtime > before || ctime > before {
+-            return Ok(None);
++        if !sound {
++            self.kind_heads.forget_segment(id, index);
++            return self.keyed_whole(id, index, path, &scan, keep, visit);
+         }
+-        Ok(Some(DirStamp(meta.dev(), meta.ino(), mtime, ctime)))
+-    }
+-    #[cfg(not(unix))]
+-    {
+-        let _ = now;
+-        Ok(None)
+-    }
+-}
+-
+-#[cfg(test)]
+-thread_local! {
+-    /// Sealed segments a keyed scan on this thread used the heads of without opening them.
+-    pub(super) static SEALED_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+-    /// Segments a keyed scan on this thread opened.
+-    pub(super) static SEGMENT_OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+-    /// [`SETTLED`] for this thread's scans, when a test sets it.
+-    pub(super) static SETTLED_FOR: std::cell::Cell<Option<std::time::Duration>> =
+-        const { std::cell::Cell::new(None) };
+-}
+-
+-/// [`SETTLED`], or a test's own.
+-fn settled_for() -> std::time::Duration {
+-    #[cfg(test)]
+-    if let Some(settled) = SETTLED_FOR.with(std::cell::Cell::get) {
+-        return settled;
++        self.kind_heads.put(id, index, heads);
++        for rec in records {
++            if !visit(rec) {
++                return Ok(false);
++            }
++        }
++        Ok(true)
+     }
+-    SETTLED
+ }
+diff --git a/cmux-tui/crates/acpmux/src/store/kind_index_tests.rs b/cmux-tui/crates/acpmux/src/store/kind_index_tests.rs
+index 750f45027062..012ab46b2dae 100644
+--- a/cmux-tui/crates/acpmux/src/store/kind_index_tests.rs
++++ b/cmux-tui/crates/acpmux/src/store/kind_index_tests.rs
+@@ -618,97 +618,6 @@ fn ledger_scan_resume_pass_bench() {
+     let _ = std::fs::remove_dir_all(&root);
+ }
+ 
+-/// Waits past the clock tick of the last folder change, then trusts folders at once
+-/// (`kind_heads.rs` `SETTLED`): a test's changes come milliseconds apart, a daemon's seconds.
+-fn settle() {
+-    std::thread::sleep(std::time::Duration::from_millis(30));
+-    kind_heads::SETTLED_FOR.with(|s| s.set(Some(std::time::Duration::ZERO)));
+-}
+-
+-/// Detector for a resend that opens every segment of its chat (cmux NEXT nightly
+-/// 1.0.0-nightly.4424316677601, 2026-11-18: three keyed scans a resend, each listing, opening and
+-/// stat-ing all of a chat's segments, held Leo's daemon at 60-130% CPU while he typed). Once a
+-/// chat's folders are settled, a keyed scan opens only its last segment, however many segments
+-/// the log has, and still sees an append, a new segment, and a sealed segment replaced by a
+-/// rename.
+-#[test]
+-fn a_keyed_scan_of_a_settled_log_opens_its_last_segment_only() {
+-    let root = root();
+-    let (store, mut log) = store_with_log(&root, 40);
+-    let segments = store.segments("c").unwrap().len() as u64;
+-    assert!(segments >= 20, "a log of many segments ({segments})");
+-    settle();
+-    let prompts = ["p2", "p25", "p288", "p900"];
+-    for prompt in prompts {
+-        assert_eq!(keyed(&store, prompt), naming(&log, prompt));
+-    }
+-    kind_heads::SEGMENT_OPENS.with(|n| n.set(0));
+-    for _ in 0..20 {
+-        for prompt in prompts {
+-            assert_eq!(keyed(&store, prompt), naming(&log, prompt));
+-        }
+-    }
+-    let opens = kind_heads::SEGMENT_OPENS.with(|n| n.get());
+-    assert_eq!(opens, 80, "80 keyed scans of a {segments}-segment log opened {opens} segments");
+-    // Appends, past a new segment or two: seen.
+-    let mut seq = log.last().unwrap().seq;
+-    for kind in ["queued", "user_message", "tool_call_update", "turn_result"] {
+-        seq += 1;
+-        let r = rec(seq, kind);
+-        store.append("c", &r).unwrap();
+-        log.push(r);
+-    }
+-    store.flush().unwrap();
+-    settle();
+-    for prompt in ["p2", "p961", "p962", "p964"] {
+-        assert_eq!(keyed(&store, prompt), naming(&log, prompt), "{prompt} after the appends");
+-    }
+-    // A sealed segment replaced by a rename: its records are the new file's.
+-    let (_, first) = store.segments("c").unwrap()[0].clone();
+-    let text = std::fs::read_to_string(&first).unwrap();
+-    let gone: Vec<String> = text
+-        .lines()
+-        .filter(|l| l.contains("\"kind\":\"queued\""))
+-        .map(|l| {
+-            serde_json::from_str::<serde_json::Value>(l).unwrap()["msg"]["promptId"]
+-                .as_str()
+-                .unwrap()
+-                .to_owned()
+-        })
+-        .collect();
+-    assert!(!gone.is_empty(), "the first segment holds a queued record");
+-    let kept: String = text
+-        .lines()
+-        .filter(|l| !l.contains("\"kind\":\"queued\""))
+-        .map(|l| format!("{l}\n"))
+-        .collect();
+-    let tmp = first.with_extension("rewrite");
+-    std::fs::write(&tmp, kept).unwrap();
+-    std::fs::rename(&tmp, &first).unwrap();
+-    log.retain(|r| !(r.kind == "queued" && gone.iter().any(|g| r.msg["promptId"] == g.as_str())));
+-    settle();
+-    for prompt in &gone {
+-        assert_eq!(keyed(&store, prompt), naming(&log, prompt), "{prompt} after the rewrite");
+-    }
+-    kind_heads::SETTLED_FOR.with(|s| s.set(None));
+-    let _ = std::fs::remove_dir_all(&root);
+-}
+-
+-/// A folder changed within `SETTLED` is not trusted: every segment is checked, as before.
+-#[test]
+-fn a_keyed_scan_of_a_log_just_written_checks_every_segment() {
+-    let root = root();
+-    let (store, log) = store_with_log(&root, 8);
+-    let segments = store.segments("c").unwrap().len() as u64;
+-    for prompt in ["p2", "p25"] {
+-        assert_eq!(keyed(&store, prompt), naming(&log, prompt));
+-    }
+-    kind_heads::SEGMENT_OPENS.with(|n| n.set(0));
+-    assert_eq!(keyed(&store, "p2"), naming(&log, "p2"));
+-    assert_eq!(kind_heads::SEGMENT_OPENS.with(|n| n.get()), segments);
+-    let _ = std::fs::remove_dir_all(&root);
+-}
+-
+ /// The keyed scans a resend makes of its chat (`hub/turns.rs`: `logged_inbox_answer`, then
+ /// `logged_prompt_past_inbox`), with their keeps (`hub/inbox.rs`, `hub/prompt_ledger.rs`
+ /// `keep_prompt`, which joins by a turn or a list too; here by the prompt, its turn and a list).
+@@ -721,15 +630,17 @@ fn resend_reads(store: &LocalStore, id: &str, prompt: &str) -> u64 {
+         seen += 1;
+         true
+     };
+-    let inbox =
+-        &mut |h: &KindHead<'_>| h.unread || h.prompt_id == Some(prompt) || h.names(|p| p == prompt);
++    // Before: a list kept whatever it named, and `logged_prompt` read the inbox again.
++    let inbox = &mut |h: &KindHead<'_>| h.unread || h.names_many || h.prompt_id == Some(prompt);
++    store.scan_kinds_keyed(id, INBOX, inbox, &mut count).unwrap();
++    let inbox = &mut |h: &KindHead<'_>| h.unread || h.names_many || h.prompt_id == Some(prompt);
+     store.scan_kinds_keyed(id, INBOX, inbox, &mut count).unwrap();
+     let state = &mut |h: &KindHead<'_>| {
+         h.unread
+             || h.prompt_id == Some(prompt)
+             || h.turn_id == Some(&turn)
+             || h.kind == "turn_stop_requested"
+-            || h.names(|p| p == prompt)
++            || h.names_many
+     };
+     store.scan_kinds_keyed(id, PROMPT_KINDS, state, &mut count).unwrap();
+     seen
