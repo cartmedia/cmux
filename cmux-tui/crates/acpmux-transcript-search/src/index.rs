@@ -110,6 +110,16 @@ pub struct Query {
     pub window: Option<(i64, i64)>,
     /// Skips this many hits (in the order the hits come).
     pub offset: usize,
+    /// Only docs written before this time (ms since the epoch, not in).
+    pub before_ms: Option<i64>,
+    /// Text no matching doc may hold (as `text` is found).
+    pub exclude: Vec<String>,
+    /// Only transcripts this harness wrote.
+    pub harness: Option<Harness>,
+    /// Only transcripts whose working directory holds this (any case).
+    pub folder: Option<String>,
+    /// `text`, `also` and `exclude` match as written, letter case too.
+    pub case_sensitive: bool,
 }
 
 impl Query {
@@ -125,6 +135,11 @@ impl Query {
             order: Order::Newest,
             window: None,
             offset: 0,
+            before_ms: None,
+            exclude: Vec::new(),
+            harness: None,
+            folder: None,
+            case_sensitive: false,
         }
     }
 }
