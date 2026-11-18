@@ -41,8 +41,7 @@ type Channel = Pick<BroadcastChannel, "postMessage" | "close"> & {
   onmessage: ((event: MessageEvent) => void) | null;
 };
 
-/// `channel`: the renderer's pages' channel; `null` (tests on a manual clock) opens none.
-export function createScrollQuiet(clock: Clock = realClock, channel: Channel | null = openChannel() ?? null): ScrollQuiet {
+export function createScrollQuiet(clock: Clock = realClock, channel: Channel | undefined = openChannel()): ScrollQuiet {
   let restAt = -Infinity;
   let announcedAt = -Infinity;
   const waits = new Set<{ run: () => void; since: number }>();
