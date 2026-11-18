@@ -11,10 +11,12 @@ pub mod index;
 pub mod locate;
 pub mod parse;
 pub mod read;
+pub mod syntax;
 
 pub use index::{CatchUp, EXACT_DOCS, Error, Hit, Index, Order, Page, Query, Result};
 pub use locate::{Roots, Source};
 pub use parse::{Harness, Role};
+pub use syntax::{Chip, ChipKind, Clock, Completion, Parsed, Scope, Term, complete, parse};
 
 /// What one [`search`] did, besides its hits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
