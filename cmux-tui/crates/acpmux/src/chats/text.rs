@@ -241,7 +241,14 @@ impl Doc {
         self.text.get(start..end).unwrap_or_default()
     }
 
-    /// The newest message that holds every word, and how many messages do.
+    /// Whether message `i` passes `needle`'s role and exclusions (always, for plain words).
+    fn accepts(&self, needle: &Needle, i: usize) -> bool {
+        !needle.filters()
+            || self.messages.get(i).is_some_and(|m| needle.accepts(self.message(i), m.answer))
+    }
+
+    /// The newest message that holds every word (and passes the needle's filters), and how many
+    /// messages do.
     fn find(&self, needle: &Needle, matcher: &Matcher) -> Option<Matched> {
         let mut found: Option<Matched> = None;
         let mut hit = |i: usize| {
@@ -252,7 +259,7 @@ impl Doc {
         let ascii = matcher.ascii.as_deref().filter(|_| !self.folds_to_ascii);
         let Some((first, rest)) = ascii.and_then(<[_]>::split_first) else {
             (self.live as usize..self.messages.len())
-                .filter(|&i| needle.find(self.message(i)).is_some())
+                .filter(|&i| needle.find(self.message(i)).is_some() && self.accepts(needle, i))
                 .for_each(hit);
             return found;
         };
@@ -267,7 +274,7 @@ impl Doc {
                 .saturating_sub(1);
             let (start, end) = self.bounds(i);
             let text = self.text.get(start..end).unwrap_or_default();
-            if rest.iter().all(|word| word.is_match(text)) {
+            if rest.iter().all(|word| word.is_match(text)) && self.accepts(needle, i) {
                 hit(i);
             }
             // The next match is in a later message.
@@ -348,8 +355,8 @@ pub struct ChatText {
 struct Inner {
     docs: HashMap<String, Arc<Doc>>,
     generation: u64,
-    /// The last query's words and the generation it was answered at.
-    answer: Option<(Vec<String>, u64, Arc<HashMap<String, Found>>)>,
+    /// The last query's needle and the generation it was answered at.
+    answer: Option<(Needle, u64, Arc<HashMap<String, Found>>)>,
     /// The text changed since it was saved.
     dirty: bool,
     /// Every chat was read once since the daemon started (a query before then may find more later).
@@ -400,7 +407,12 @@ impl ChatText {
     /// What the transcript index found for `needle`'s words, by chat key, and whether a newer
     /// answer is coming. Never waits for the index.
     pub fn deep_search(&self, needle: &Needle) -> (Option<super::deep::Found>, bool) {
-        self.deep.answer(&super::deep::indexable(needle.words()))
+        self.deep.answer(&super::deep::Ask::words(super::deep::indexable(needle.words())))
+    }
+
+    /// [`Self::deep_search`] for a query of the search syntax: its words and filters.
+    pub fn deep_search_for(&self, ask: &super::deep::Ask) -> (Option<super::deep::Found>, bool) {
+        self.deep.answer(ask)
     }
 
     /// A row's `match` for a chat the transcript index found ([`DeepHit`]): [`Self::hit`]'s
@@ -616,16 +628,20 @@ impl ChatText {
         let mut inner = lock(&self.inner);
         let now = inner.generation;
         let last = inner.answer.as_ref().filter(|(_, generation, _)| *generation == now);
-        if let Some((words, _, found)) = last
-            && words.as_slice() == needle.words()
+        if let Some((last, _, found)) = last
+            && last == needle
         {
             return found.clone();
         }
         // A message holding every new word holds every old word inside one of them, under either
-        // pass (`Doc::find`): the new hits are among the old.
+        // pass (`Doc::find`): the new hits are among the old (with the same filters).
         let narrowed = last
-            .filter(|(words, _, _)| {
-                words.iter().all(|old| needle.words().iter().any(|new| new.contains(old.as_str())))
+            .filter(|(last, _, _)| {
+                last.same_filters(needle)
+                    && last
+                        .words()
+                        .iter()
+                        .all(|old| needle.words().iter().any(|new| new.contains(old.as_str())))
             })
             .map(|(_, _, found)| found.clone());
         let matcher = Matcher::new(needle);
@@ -642,7 +658,7 @@ impl ChatText {
             inner.scanned += narrowed.as_ref().map_or(inner.docs.len(), |last| last.len());
         }
         let found = Arc::new(found);
-        inner.answer = Some((needle.words().to_vec(), inner.generation, found.clone()));
+        inner.answer = Some((needle.clone(), inner.generation, found.clone()));
         found
     }
 

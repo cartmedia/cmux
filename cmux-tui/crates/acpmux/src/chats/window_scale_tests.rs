@@ -174,8 +174,8 @@ fn a_word_past_the_held_text_comes_from_the_transcript_index_while_filling() {
     let text = text_of(home.path(), &index, chats);
     let old = 7;
     assert!(!holds_word(old, chats));
-    text.deep().set_search(Box::new(move |words| {
-        assert_eq!(words, ["zephyrine".to_owned()]);
+    text.deep().set_search(Box::new(move |ask| {
+        assert_eq!(ask.words, ["zephyrine".to_owned()]);
         let hit = acpmux_transcript_search::Hit {
             session: session_id(old),
             harness: acpmux_transcript_search::Harness::Claude,
@@ -227,4 +227,134 @@ fn a_word_past_the_held_text_comes_from_the_transcript_index_while_filling() {
     // The held text's own matches carry no time: the page reveals them as before.
     let held = next.rows.iter().find(|(key, _)| !key.ends_with(&session_id(old))).unwrap();
     assert!(held.1["match"].get("at").is_none());
+}
+
+/// The search syntax in the chats window: operators filter what the ranker and the content search
+/// found; a plain query is the window it always was.
+#[test]
+fn operators_filter_the_window_by_role_exclusion_phrase_folder_harness_and_time() {
+    let chats = 200;
+    let home = tempfile::tempdir().unwrap();
+    let index = index_of(home.path(), chats);
+    let text = text_of(home.path(), &index, chats);
+    let activity = ChatActivity::default();
+    let window = |query: &str, extra: Value| -> WindowRows {
+        let mut params = json!({"window": "all", "query": query, "limit": LIMIT, "content": true,
+            "untitled": "New chat"});
+        if let (Some(p), Some(e)) = (params.as_object_mut(), extra.as_object()) {
+            p.extend(e.clone());
+        }
+        rows(&WindowSpec::from_params(&params).unwrap(), &index, &activity, Some(&text))
+    };
+    let count = |query: &str| window(query, json!({})).rows.len();
+    assert_eq!(count("zephyrine"), 3);
+    assert_eq!(count("zephyrine from:agent"), 3, "the word is in the answers");
+    assert_eq!(count("zephyrine from:me"), 0, "and in no prompt");
+    assert_eq!(count("zephyrine from:tool"), 0, "the held text has no tool calls");
+    assert_eq!(count("zephyrine -columns"), 0);
+    assert_eq!(count("zephyrine -\"two rows\""), 3);
+    assert_eq!(count("\"migration failed\""), 3, "a phrase as written");
+    assert_eq!(count("\"failed migration\""), 0, "not its words in another order");
+    assert_eq!(count("zephyrine folder:P3"), 1, "/work/p3, any case");
+    assert_eq!(count("zephyrine repo:p3"), 1);
+    assert_eq!(count("zephyrine agent:codex"), 0);
+    assert_eq!(count("zephyrine agent:claude"), 3);
+    assert_eq!(count("zephyrine before:2000-01-01"), 0);
+    assert_eq!(count("zephyrine since:2000-01-01"), 3);
+    assert_eq!(window("zephyrine", json!({"sinceMs": i64::MAX / 2})).rows.len(), 0);
+    assert_eq!(window("zephyrine", json!({"sinceMs": 0})).rows.len(), 3);
+    // Operators alone list the newest chats they pass: /work/p3 and /work/p30..p39.
+    let listed = window("folder:p3", json!({}));
+    assert_eq!(listed.rows.len(), chats / 50 * 11);
+    assert!(listed.rows.iter().all(|(_, v)| v["cwd"].as_str().unwrap().contains("/work/p3")));
+    // A title match an exclusion names is dropped.
+    assert_eq!(count("build"), LIMIT);
+    assert_eq!(count("build -build"), 0);
+
+    // The answer says how the query read when it holds an operator or a problem.
+    let spec = WindowSpec::from_params(&json!({"window": "w", "query": "zephyrine from:agent",
+        "content": true}))
+    .unwrap();
+    let mut state = WindowState::new(spec.clone(), 0);
+    let message = state.next(rows(&spec, &index, &activity, Some(&text))).unwrap();
+    assert_eq!(message["parsed"]["role"], "assistant");
+    assert_eq!(message["parsed"]["chips"][0]["kind"], "from");
+    let plain = WindowSpec::from_params(&json!({"window": "w", "query": "zephyrine"})).unwrap();
+    let mut state = WindowState::new(plain.clone(), 0);
+    let message = state.next(rows(&plain, &index, &activity, Some(&text))).unwrap();
+    assert!(message.get("parsed").is_none(), "plain words: the message it always was");
+    assert!(WindowSpec::from_params(&json!({"window": "w", "sinceMs": "soon"})).is_err());
+    assert!(WindowSpec::from_params(&json!({"window": "w", "tzOffsetMinutes": 9999})).is_err());
+}
+
+/// The index is asked with the query's filters, and its hits outside the times are dropped.
+#[test]
+fn the_transcript_index_is_asked_with_the_operators() {
+    let chats = 200;
+    let home = tempfile::tempdir().unwrap();
+    let index = index_of(home.path(), chats);
+    let text = text_of(home.path(), &index, chats);
+    let old = 7;
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    text.deep().set_search(Box::new(move |ask| {
+        seen.lock().unwrap().push(ask.clone());
+        let hit = acpmux_transcript_search::Hit {
+            session: session_id(old),
+            harness: acpmux_transcript_search::Harness::Claude,
+            path: "/p.jsonl".into(),
+            subagent: false,
+            turn: 1,
+            line: 2,
+            at_ms: Some(1_794_000_000_000),
+            role: acpmux_transcript_search::Role::Tool,
+            snippet: "grep zephyrine".into(),
+            match_start: 5,
+            match_len: 9,
+            cut_before: false,
+            cut_after: false,
+            message_id: None,
+            matches: 1,
+            in_window: false,
+        };
+        Some(vec![(hit, 1)])
+    }));
+    let mut moved = text.subscribe();
+    let activity = ChatActivity::default();
+    let spec = WindowSpec::from_params(&json!({"window": "all", "content": true, "limit": LIMIT,
+        "query": "zephyrine -flaky from:tool agent:claude folder:work before:2026-11-01",
+        "sinceMs": 5}))
+    .unwrap();
+    let first = rows(&spec, &index, &activity, Some(&text));
+    assert!(first.filling && first.rows.is_empty(), "from:tool: the index alone answers");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), moved.changed())
+            .await
+            .unwrap()
+            .unwrap();
+    });
+    let next = rows(&spec, &index, &activity, Some(&text));
+    assert_eq!(next.rows.len(), 1);
+    assert!(next.rows[0].0.ends_with(&session_id(old)));
+    let ask = asked.lock().unwrap()[0].clone();
+    assert_eq!(ask.words, ["zephyrine"]);
+    assert_eq!(ask.exclude, ["flaky"]);
+    assert_eq!(ask.role, Some(acpmux_transcript_search::Role::Tool));
+    assert_eq!(ask.harness, Some(acpmux_transcript_search::Harness::Claude));
+    assert_eq!(ask.folder.as_deref(), Some("work"));
+    assert_eq!(ask.since_ms, Some(5));
+    assert!(ask.before_ms.is_some());
+    // A hit the index gives past the window's times is not shown.
+    let late = WindowSpec::from_params(&json!({"window": "all", "content": true,
+        "query": "zephyrine from:tool before:2000-01-01"}))
+    .unwrap();
+    let _ = rows(&late, &index, &activity, Some(&text));
+    runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), moved.changed())
+            .await
+            .unwrap()
+            .unwrap();
+    });
+    assert!(rows(&late, &index, &activity, Some(&text)).rows.is_empty());
 }

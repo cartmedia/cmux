@@ -100,9 +100,17 @@ and two messages each side; `--before`/`--after N` take more, `--no-tools`
 leaves tool calls out, `--show SESSION --turn N` reads a whole turn. Bounded
 (32 KiB of text unless `--max-bytes` says more), so it is safe on a huge chat.
 
+The query takes operators: words (all of them, any order, in one message),
+`"exact phrase"`, `-word` / `-"a phrase"`, `from:me|agent|tool`,
+`agent:claude|codex`, `folder:NAME` (`repo:NAME`), `since:` / `before:` (`7d`,
+`24h`, `today`, `yesterday`, `2026-11-01`), `in:this` / `in:all`;
+`--case-sensitive` matches letter case. A `-word` on the command line needs
+`--` first. An unknown `key:value` (a URL) is searched as written.
+
 ```bash
-acpmux search "four agent pages" --session self            # this chat, compacted turns included
-acpmux search "merge_hold" --machine all --since 2d            # every session here and on every peer
+acpmux search '"four agent pages"' --session self          # this chat, the exact phrase, compacted turns included
+acpmux search merge_hold --machine all --since 2d            # every session here and on every peer
+acpmux search -- deploy -flaky from:agent since:yesterday    # operators; -word after --
 acpmux --json search "root cause" --session coord --role assistant
 acpmux search --show e8f63fd9-94e8-4878-bcd4-704659aba1f2:120034 --after 4   # a hit, whole
 acpmux search --show self --turn 412 --no-tools                # that turn's prompt and replies
