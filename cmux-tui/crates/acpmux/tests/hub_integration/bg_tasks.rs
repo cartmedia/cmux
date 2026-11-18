@@ -531,6 +531,42 @@ async fn a_task_with_notify_tells_its_chat_once_when_it_ends() {
     assert_eq!(statuses, [&json!("ok"), &json!("failed")], "{list}");
 }
 
+/// This process's threads named `name` (Linux: `/proc/self/task/*/comm`).
+#[cfg(target_os = "linux")]
+fn threads_named(name: &str) -> usize {
+    let tasks = std::fs::read_dir("/proc/self/task").into_iter().flatten().flatten();
+    tasks
+        .filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c.trim() == name))
+        .count()
+}
+
+/// Detector: a watched task's end is a kernel event, not a thread in `flock` (a 10K-session Mac
+/// had 16 `acpmux-bg-watch` threads sat idle while their tasks ran, 2026-11-18). Sixteen running
+/// `notify` tasks hold no watch thread, and each end still reaches the chat once.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn watched_tasks_hold_no_thread_while_they_run() {
+    const TASKS: usize = 16;
+    let mut r = rig(PermissionPolicy::ApproveAll).await;
+    r.hub.set_bg_runner(crate::daemon_env::bg_runner(), acpmux::bg_run::SEGMENT);
+    let id = new_session(&mut r.c, "watched").await;
+    let gate = std::env::temp_dir().join(format!("acpmux-bg-gate-{}", uuid::Uuid::now_v7()));
+    let command = format!("while [ ! -e '{}' ]; do sleep 0.05; done; echo done", gate.display());
+    let mut tasks = Vec::new();
+    for _ in 0..TASKS {
+        let start = json!({"sessionId": id, "command": command, "notify": true});
+        let task = r.c.request(method::MUX_BG_START, start).await.unwrap();
+        tasks.push(task["id"].as_str().unwrap().to_owned());
+    }
+    r.until("the tasks never ran", || tasks.iter().all(|t| state(&r, &id, t) == "running")).await;
+    // Time for a watch thread to start, which must not.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(threads_named("acpmux-bg-watch"), 0, "a running task holds a watch thread");
+    std::fs::write(&gate, b"").unwrap();
+    r.until("every end reached its chat", || ends(&r.hub, &id).len() == TASKS).await;
+    let _ = std::fs::remove_file(&gate);
+}
+
 /// Waits up to 20 s for `done`.
 async fn until_true(what: &str, done: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
