@@ -251,9 +251,13 @@ await requireBrowserLane("composer-keystroke-isolation-browser.test.ts", async (
             const form = document.querySelector("form.acpmux-composer");
             const cls = el && typeof el.className === "string" ? el.className.split(/\\s+/).filter(Boolean).slice(0, 2) : [];
             const label = el ? [el.tagName.toLowerCase(), ...cls].join(".") : String(this.nodeName);
-            return { inside: !!(form && el && form.contains(el)), label };
+            return { inside: !!(form && el && form.contains(el)), detached: !this.isConnected, label };
           }`,
-        })) as { result: { value: { inside: boolean; label: string } } };
+        })) as { result: { value: { inside: boolean; detached: boolean; label: string } } };
+        // A node the edit added and then replaced in the same window (ProseMirror swaps a text node on
+        // the next key) is out of the document by now: no layout happened outside, as with the removed
+        // ones above.
+        if (result.value.detached) continue;
         inside = result.value.inside;
         label = result.value.label;
       } catch {
