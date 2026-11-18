@@ -243,6 +243,7 @@ import {
 } from "./conversation/promptCoach";
 import { promptCoachDismissed, rememberPromptCoachDismissed } from "./conversation/promptCoachDismissed";
 import { promptCoachEnabled } from "./chatDisplay";
+import { keyFrame } from "./schedule/keyFrame";
 import {
   PRESET_APPROVAL,
   PresetApprovalFold,
@@ -1999,41 +2000,6 @@ function drawShown(): void {
   for (const wait of due) wait();
 }
 
-/// A keystroke never waits on the stream's draw (Leo, 2026-11-17: "why should typing... wait on
-/// rendering???"). A key's edit is in the DOM when its event ends, and it shows at the next frame's
-/// paint, after that frame's animation callbacks: the stream's draw (a transcript render, 10 to 13 ms
-/// at 1,500 rows) ran there and the letter waited for it. So the first frame after a key draws
-/// nothing of the stream; the stream's draw takes the frame after, with everything that landed
-/// meanwhile. Once per key: keys faster than the display defer the stream at most every other frame,
-/// and the 50 ms fallback in `nextFrame` still bounds the wait.
-let lastKeyAt = Number.NEGATIVE_INFINITY;
-let yieldedKeyAt = Number.NEGATIVE_INFINITY;
-/// A key at most this long ago is the one the coming frame paints.
-const KEY_FRAME_MS = 20;
-let keyWatch = false;
-function watchKeys(): void {
-  if (keyWatch || typeof window === "undefined" || typeof window.addEventListener !== "function") return;
-  keyWatch = true;
-  const note = () => {
-    lastKeyAt = performance.now();
-  };
-  // Capture, passive: the watch only reads the time, before any handler, and never delays the key.
-  for (const type of ["keydown", "beforeinput", "compositionupdate"])
-    window.addEventListener(type, note, { capture: true, passive: true });
-}
-/// The frame (its rAF time) a key took: every chat's draw in that frame waits, not only the first.
-let yieldedFrame: number | undefined;
-/// Whether the draw asked for in the frame at `frameTime` waits a frame for a key. The 50 ms fallback
-/// (no frame time) never waits: it is the bound.
-function keyYieldsFrame(frameTime: number | undefined): boolean {
-  if (frameTime === undefined) return false;
-  if (frameTime === yieldedFrame) return true;
-  if (lastKeyAt === yieldedKeyAt || performance.now() - lastKeyAt > KEY_FRAME_MS) return false;
-  yieldedKeyAt = lastKeyAt;
-  yieldedFrame = frameTime;
-  return true;
-}
-
 /// Runs `run` once before the next display frame, or after 50 ms when a shown page draws no frames
 /// (an occluded window). A hidden page draws nothing: `run` waits until it shows, also when the page
 /// hides before the frame comes, and its first frame then draws everything that landed meanwhile
@@ -2042,10 +2008,12 @@ function keyYieldsFrame(frameTime: number | undefined): boolean {
 /// waiting. A hidden page used to draw the shown chat's stream every 50 ms that nobody could see.
 /// Whichever of the frame and the 50 ms fallback comes first cancels the other: the fallback left
 /// waiting woke the page 50 ms after every drawn frame to do nothing (CMUX-571 idle wakeups).
+/// The first frame after a key draws the key alone: the stream's work waits one frame, once
+/// (schedule/keyFrame.ts), so the composer's echo never waits behind the transcript's commit.
 export const nextFrame = (run: () => void): (() => void) => {
-  watchKeys();
   let done = false;
   let stopPending: (() => void) | undefined;
+  let yielded = false;
   const frame = () => {
     if (done) return;
     if (!pageShown()) return waitForShow(frame);
@@ -2059,10 +2027,8 @@ export const nextFrame = (run: () => void): (() => void) => {
     };
     const once = (frameTime?: number) => {
       if (ran || done) return;
-      // A key typed since the last frame paints first: this frame draws only its edit, and the
-      // stream's draw takes the next one (`keyYieldsFrame`).
-      const at = typeof frameTime === "number" ? frameTime : undefined;
-      if (keyYieldsFrame(at) && typeof requestAnimationFrame === "function" && typeof drawn === "number") {
+      if (!yielded && typeof frameTime === "number" && keyFrame(frameTime)) {
+        yielded = true;
         drawn = requestAnimationFrame(once);
         return;
       }
@@ -2074,7 +2040,7 @@ export const nextFrame = (run: () => void): (() => void) => {
     };
     stopPending = stop;
     drawn = requestAnimationFrame(once);
-    fallback = setTimeout(() => once(), 50);
+    fallback = setTimeout(once, 50);
     // A frame that came at once (a test's clock) leaves no fallback behind.
     if (ran) stop();
   };
@@ -11427,11 +11393,6 @@ export class AcpmuxDirectClient {
     this.heldStartMode = { modeId, ticket, generation: this.selectionGeneration };
   }
 
-  /// The agent a sessionless chat's first send starts (the pane's host config), when it names one.
-  get startHarness(): string | undefined {
-    return this.host.harness;
-  }
-
   async ensureSession(): Promise<string | undefined> {
     // This send belongs to the requested chat. A refused or empty start must not send it to
     // the previous chat, or start the default harness instead of the one the person picked.
@@ -11444,12 +11405,7 @@ export class AcpmuxDirectClient {
         this.create(this.host.harness, this.host.peer ? this.host.cwd : undefined, this.host.peer));
       // The app also calls this before send(): an empty result must stop that preflight,
       // otherwise send() would ensure again after the failed creation has been cleared.
-      // `superseded`: another chat was selected (or the page closed) while the start was out, so it
-      // is no failure of this chat's; App.tsx says nothing in the chat now shown.
-      if (!sessionId)
-        throw Object.assign(new Error(translate("error.notOpen")), {
-          superseded: this.closed || generation !== this.selectionGeneration,
-        });
+      if (!sessionId) throw new Error(translate("error.notOpen"));
       // The newest pick for this chat, one made while the start was pending included. It goes to the
       // session this start made, never the selected one: another chat picked while the ticket is
       // pending must not take a held Bypass permissions.
@@ -13296,33 +13252,7 @@ export class AcpmuxDirectClient {
   }
   /// `adopting`: the spare page's open of its tab's chat (`adoptSession`). A chat its list lacks that
   /// fails to attach keeps the tail it drew on screen, for `adoptSession` to say why under it or drop.
-  /// Shows and attaches `sessionId`: the chat once its attach is in, undefined when a selection of
-  /// another chat won. A newer selection of this same chat (its store sub fell and opened it again as
-  /// v1, `chatRows.fell`; a pick of it again) decides for this one too: its outcome is this one's,
-  /// never undefined while that open attached the chat (issue 44964: a New Tab's first send read the
-  /// superseded open as "cmux did not start a session" with the chat on screen).
-  select(sessionId: string, adopting = false): Promise<string | undefined> {
-    const opening = this.selectOnce(sessionId, adopting);
-    const mine: { sessionId: string; result: Promise<string | undefined> } = { sessionId, result: opening };
-    const sameChatAfter = () => {
-      const newer = this.latestSelect;
-      return newer !== mine && newer?.sessionId === sessionId ? newer.result : undefined;
-    };
-    mine.result = opening.then(
-      (selected) => selected ?? sameChatAfter(),
-      (error: unknown) => {
-        const after = sameChatAfter();
-        if (after) return after;
-        throw error;
-      },
-    );
-    this.latestSelect = mine;
-    return mine.result;
-  }
-  /// The newest `select`, read by an older one of the same chat whose generation it moved.
-  private latestSelect?: { sessionId: string; result: Promise<string | undefined> };
-
-  private async selectOnce(sessionId: string, adopting: boolean): Promise<string | undefined> {
+  async select(sessionId: string, adopting = false): Promise<string | undefined> {
     this.pendingPeerTrust = undefined;
     this.refusedPeerTrust = undefined;
     const previousSessionId = this.selectedSessionId;
@@ -13546,23 +13476,13 @@ export class AcpmuxDirectClient {
     current: () => boolean = () => true,
     failed?: (error: unknown) => void,
     declined?: () => void,
-    fenced = true,
   ): Promise<any> {
     const generation = this.selectionGeneration;
     const trustCancellation = this.trustCancellation;
     try {
       const result = await this.request("session/new", params);
-      // A canceled start owns neither the next Trust question nor one-shot startup defaults. One
-      // whose caller owns its cancellation (`fenced` false: a harness switch's start, which a
-      // selection of the same chat moves on, issue 44964) is fenced on Trust only. A session
-      // dropped here is discarded, never left running with no tab.
-      if ((fenced && generation !== this.selectionGeneration) || trustCancellation !== this.trustCancellation) {
-        // Only a start this request made fresh is ours to end. An adopt resumes the person's own
-        // conversation, which acpmux may already have bound to another pane: never killed here.
-        const adopting = Boolean((params._meta as { acpmux?: { adopt?: unknown } } | undefined)?.acpmux?.adopt);
-        if (result?.sessionId && !this.closed && !adopting) this.discard(String(result.sessionId));
-        return undefined;
-      }
+      // A canceled start owns neither the next Trust question nor one-shot startup defaults.
+      if (generation !== this.selectionGeneration || trustCancellation !== this.trustCancellation) return undefined;
       return result;
     } catch (error) {
       const ownsRefusal =
@@ -13647,10 +13567,6 @@ export class AcpmuxDirectClient {
   ): Promise<string | undefined> {
     this.cancelTrustStart?.();
     const generation = this.selectionGeneration;
-    // The one-shot startup picks a successful start consumes (startSession): a start the person
-    // left gives them back, so the pane's next new chat still starts on them (issue 44964).
-    const picks = { cwd: this.host.cwd, harness: this.host.harness, model: this.host.model, peer: this.host.peer };
-    const folders = this.newChatFolders;
     const started = (async () => {
       // The New Tab request still owns its draft, attachments and machine. Trust resumes this
       // same promise, so its sender runs once and never targets an unmounted chat composer.
@@ -13701,17 +13617,7 @@ export class AcpmuxDirectClient {
             );
       // A user who opened another chat while session/new was out owns that selection.
       if (this.closed || generation !== this.selectionGeneration) {
-        if (sessionId && !this.closed) {
-          this.discard(sessionId);
-          this.host = {
-            ...this.host,
-            cwd: this.host.cwd ?? picks.cwd,
-            harness: this.host.harness ?? picks.harness,
-            model: this.host.model ?? picks.model,
-            peer: this.host.peer ?? picks.peer,
-          };
-          this.newChatFolders ??= folders;
-        }
+        if (sessionId && !this.closed) this.discard(sessionId);
         return undefined;
       }
       if (sessionId) this.startedChat = { sessionId, visit: generation };
@@ -13764,8 +13670,6 @@ export class AcpmuxDirectClient {
         this.emit();
       },
       declined,
-      // A local start's caller fences it (`create`, HarnessSwitch); a peer start is fenced below.
-      Boolean(pending.peer),
     );
     // A deferred local harness switch intentionally leaves the displayed chat at first Send;
     // HarnessSwitch owns that start's cancellation. Only peer starts use this route fence.
