@@ -29,11 +29,9 @@ import {
   firstProject,
   homePath,
   isAgentHome,
-  mostRecentProject,
   projectLabel,
   sessionMark,
-  folderFields,
-  SessionsBy,
+  LocalFolderRecency,
 } from "../sessionList";
 import { leaders } from "../leads";
 import { WorktreeFailure } from "../startFolder";
@@ -453,14 +451,14 @@ export function NewTabScreen(props: Props) {
   }, [props.startMachine]);
   const folderless = !props.cwd || props.cwd === home || isAgentHome(props.cwd);
   const startsRecent = !picked && folderless && !props.startCwd;
-  // The chats as their folders read them (sessionList.ts `folderFields`): another chat working changes
-  // none of them, so the newest project is not looked for again in every chat on each of its events.
-  const folderSessions = useRef<SessionsBy>(null);
-  folderSessions.current ??= new SessionsBy(folderFields);
-  const foldersOf = folderSessions.current.of(snapshot.sessions);
+  // This Mac's chat folders, newest first, kept as the chats change (sessionList.ts
+  // `LocalFolderRecency`): a chat working moves its folder up without every chat being sorted again.
+  const recency = useRef<LocalFolderRecency>(null);
+  recency.current ??= new LocalFolderRecency();
+  const recentFolders = recency.current.of(snapshot.sessions);
   const candidate = useMemo(
-    () => (startsRecent ? mostRecentProject(foldersOf, home, props.knownProjects) : undefined),
-    [startsRecent, foldersOf, home, props.knownProjects],
+    () => (startsRecent ? firstProject(recentFolders, home, props.knownProjects) : undefined),
+    [startsRecent, recentFolders, home, props.knownProjects],
   );
   // Decided once, as the page mounts (Leo 2026-10-19: the first frame showed "Choose folder", then
   // flipped to the recent project): the newest in the chats the page already has, else the newest a

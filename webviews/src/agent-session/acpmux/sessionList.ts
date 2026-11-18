@@ -602,12 +602,17 @@ export class SessionsBy {
 /// on this Mac: no folder list orders another machine's chats by it, and at Leo's scale those were
 /// most of the changes (another machine's lanes working), each building every page's project list
 /// again from 10K chats (bench/session-scale-typing.bench.ts).
-export const folderFields = (session: AcpmuxSessionEntry): readonly unknown[] => [
+/// Where a session works, without when: the folders a list names, not their order.
+export const placeFields = (session: AcpmuxSessionEntry): readonly unknown[] => [
   session.cwd,
   session.host,
   session.hostKind,
   session.peer,
   listed(session),
+];
+
+export const folderFields = (session: AcpmuxSessionEntry): readonly unknown[] => [
+  ...placeFields(session),
   !session.peer && (!session.hostKind || session.hostKind === "local") ? activityTime(session) : undefined,
 ];
 
@@ -615,17 +620,87 @@ export const folderFields = (session: AcpmuxSessionEntry): readonly unknown[] =>
 /// chat on another machine. `mostRecentProject` picks from it; a New Tab page keeps it for the next
 /// page's first frame (newtab/recentProject.ts).
 export function recentLocalFolders(sessions: readonly AcpmuxSessionEntry[], limit = Infinity): string[] {
-  const local = sessions.filter((session) => {
-    const cwd = session.cwd?.replace(/\/+$/, "");
-    if (!cwd || cwd === "~" || isAgentHome(cwd)) return false;
-    return !session.peer && (!session.hostKind || session.hostKind === "local") && listed(session);
-  });
+  const local = sessions.filter((session) => localFolder(session) !== undefined);
   const folders = new Set<string>();
   for (const session of byRecency(local)) {
     folders.add(session.cwd!.replace(/\/+$/, ""));
     if (folders.size >= limit) break;
   }
   return [...folders];
+}
+
+/// The folder `recentLocalFolders` lists a session under, or undefined when it lists none for it.
+function localFolder(session: AcpmuxSessionEntry): string | undefined {
+  const cwd = session.cwd?.replace(/\/+$/, "");
+  if (!cwd || cwd === "~" || isAgentHome(cwd)) return undefined;
+  return !session.peer && (!session.hostKind || session.hostKind === "local") && listed(session) ? cwd : undefined;
+}
+
+/// `recentLocalFolders` of a list that changes one chat at a time, kept as the list changes: a chat on
+/// this Mac working moves its folder to the front, without sorting every chat again. The same array
+/// while the order holds. Anything else (a chat added or gone, one moved to another folder, a time
+/// that went back or ties another folder's) builds it again from the whole list. Leo, 2026-11-18,
+/// "typing in the composer still slow 😞 there must be a lot of open stuff?": each page sorted all
+/// 10K chats on every event of a chat on this Mac (bench/session-scale-typing.bench.ts).
+export class LocalFolderRecency {
+  private last: readonly AcpmuxSessionEntry[] | undefined;
+  private order: string[] = [];
+  private newest = new Map<string, number>();
+  private seen = new Map<string, { folder: string | undefined; at: number }>();
+
+  of(sessions: readonly AcpmuxSessionEntry[]): readonly string[] {
+    if (sessions === this.last) return this.order;
+    const replaced = this.last === undefined ? undefined : replacedSince(this.last, sessions);
+    this.last = sessions;
+    if (!replaced || !replaced.every((at) => this.moved(sessions[at]!))) this.build(sessions);
+    return this.order;
+  }
+
+  private build(sessions: readonly AcpmuxSessionEntry[]) {
+    this.order = recentLocalFolders(sessions);
+    this.newest = new Map();
+    this.seen = new Map();
+    for (const session of sessions) {
+      const folder = localFolder(session);
+      const at = activityTime(session) ?? 0;
+      this.seen.set(session.sessionId, { folder, at });
+      if (folder !== undefined && at > (this.newest.get(folder) ?? -Infinity)) this.newest.set(folder, at);
+    }
+  }
+
+  /// Applies one replaced session; false when the whole list must be read again.
+  private moved(session: AcpmuxSessionEntry): boolean {
+    const before = this.seen.get(session.sessionId);
+    const folder = localFolder(session);
+    const at = activityTime(session) ?? 0;
+    if (!before || before.folder !== folder || at < before.at) return false;
+    this.seen.set(session.sessionId, { folder, at });
+    if (folder === undefined || at === before.at) return true;
+    const newest = this.newest.get(folder)!;
+    if (at < newest) return true;
+    // Its folder's newest time again, from another chat: a tie with another folder may order otherwise.
+    if (at === newest) return false;
+    this.newest.set(folder, at);
+    const from = this.order.indexOf(folder);
+    if (from < 0) return false;
+    // Its new place: after every folder newer than it. A tie keeps the list's own order: build again.
+    let to = 0;
+    while (to < this.order.length) {
+      const other = this.order[to]!;
+      if (other !== folder) {
+        const time = this.newest.get(other)!;
+        if (time === at) return false;
+        if (time < at) break;
+      }
+      to += 1;
+    }
+    if (to >= from) return true;
+    const next = this.order.slice();
+    next.splice(from, 1);
+    next.splice(to, 0, folder);
+    this.order = next;
+    return true;
+  }
 }
 
 /// The first of `folders` (newest first) a New Tab may start in: not the home folder, and with
