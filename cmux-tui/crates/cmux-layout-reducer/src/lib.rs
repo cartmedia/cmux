@@ -952,8 +952,12 @@ mod exhaustive_tests;
 mod rows_tests;
 
 #[cfg(test)]
+mod activity_view_tests;
+
+#[cfg(test)]
 mod sidebar_face_tests;
 
+pub mod activity_view;
 pub mod auto_archive;
 pub mod closing_panes;
 pub mod divider_insert;
