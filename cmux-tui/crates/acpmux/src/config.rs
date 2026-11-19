@@ -438,20 +438,47 @@ pub(crate) fn validate_private_state_ancestors(dir: &Path) -> Result<()> {
         Ok(())
     };
 
+    // A test binary's measurement over a copy of a real chat checks only what is in the copy's
+    // root (`skip_ancestor_check`); every other build and path checks every ancestor.
+    #[cfg(test)]
+    let seam = std::env::var_os(PERF_SESSIONS_SEAM).map(std::path::PathBuf::from);
+    #[cfg(not(test))]
+    let seam: Option<std::path::PathBuf> = None;
+    let floor = seam.as_deref().filter(|root| skip_ancestor_check(dir, Some(root), cfg!(test)));
+    let checked = |path: &Path| floor.is_none_or(|root| path.starts_with(root));
+
     let mut existing = dir.parent().unwrap_or_else(|| Path::new("/"));
     while std::fs::symlink_metadata(existing).is_err() {
         let Some(parent) = existing.parent() else { break };
         existing = parent;
     }
-    for path in existing.ancestors() {
+    for path in existing.ancestors().filter(|p| checked(p)) {
         check(path, &std::fs::symlink_metadata(path)?)?;
     }
     let canonical = std::fs::canonicalize(existing)
         .with_context(|| format!("resolve state path ancestor {}", existing.display()))?;
-    for path in canonical.ancestors() {
+    for path in canonical.ancestors().filter(|p| checked(p)) {
         check(path, &std::fs::symlink_metadata(path)?)?;
     }
     Ok(())
+}
+
+/// The variable a test binary's `older_page_perf` names its copy of a real chat's sessions
+/// folder with (`hub/paging_tests.rs`).
+#[cfg(test)]
+const PERF_SESSIONS_SEAM: &str = "OLDER_PAGE_SESSIONS";
+
+/// Whether the ancestor check of `path` (`validate_private_state_ancestors`) leaves out the
+/// folders above `seam_root`: only in a test build (`test_build`, `cfg!(test)`), only when the
+/// test binary names that root (`OLDER_PAGE_SESSIONS`) and `path` is it or in it. A lane VM's
+/// agent runs in a user namespace where `/`, `/home` and `/tmp` are owned by `nobody`, so a
+/// store anywhere is refused there and `older_page_perf` cannot read its copy of a chat. The
+/// root and every folder in it are still checked (owner, mode, links), and a build that is not a
+/// test never leaves anything out.
+#[cfg(unix)]
+fn skip_ancestor_check(path: &Path, seam_root: Option<&Path>, test_build: bool) -> bool {
+    test_build
+        && seam_root.is_some_and(|root| !root.as_os_str().is_empty() && path.starts_with(root))
 }
 
 /// Open an existing state file without following a final symlink, verify its
@@ -1963,5 +1990,28 @@ mod web_url_tests {
             web_url_for_session("http://h/?a=1#token=t", "s"),
             "http://h/?a=1&session=s#token=t"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ancestor_seam_tests {
+    use super::skip_ancestor_check;
+    use std::path::Path;
+
+    /// The seam leaves out a store root's ancestors only in a test build that names that root.
+    #[test]
+    fn only_a_test_build_naming_the_root_skips_its_ancestors() {
+        let root = Path::new("/tmp/copy/sessions");
+        assert!(skip_ancestor_check(root, Some(root), true));
+        assert!(skip_ancestor_check(&root.join("chat/events"), Some(root), true));
+        // A build that is not a test checks every ancestor, whatever the variable says.
+        assert!(!skip_ancestor_check(root, Some(root), false));
+        assert!(!skip_ancestor_check(&root.join("chat/events"), Some(root), false));
+        // Any other root, a sibling whose name starts the same, or no variable: checked.
+        assert!(!skip_ancestor_check(Path::new("/home/me/.acpmux/sessions"), Some(root), true));
+        assert!(!skip_ancestor_check(Path::new("/tmp/copy/sessions2"), Some(root), true));
+        assert!(!skip_ancestor_check(Path::new("/tmp/copy"), Some(root), true));
+        assert!(!skip_ancestor_check(root, None, true));
+        assert!(!skip_ancestor_check(root, Some(Path::new("")), true));
     }
 }
