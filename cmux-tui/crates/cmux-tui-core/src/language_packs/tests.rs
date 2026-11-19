@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde_json::json;
@@ -109,15 +109,22 @@ impl Server {
     }
 }
 
-fn manifest_file(folder: &Path, packs: serde_json::Value) -> PathBuf {
+fn manifest_file(folder: &Path, packs: Value) -> PathBuf {
     let path = folder.join("language-packs.json");
-    std::fs::write(&path, serde_json::to_vec(&json!({"version": 1, "packs": packs})).unwrap())
-        .unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"version": 1, "packs": packs})).unwrap(),
+    )
+    .unwrap();
     path
 }
 
 fn request(language: &str, manifest: PathBuf, cache: PathBuf) -> Request {
-    Request { language: language.into(), manifest, cache }
+    Request {
+        language: language.into(),
+        manifest,
+        cache,
+    }
 }
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -132,7 +139,14 @@ fn a_manifest_is_version_1_with_well_formed_packs() {
     };
     let url = "https://files-next.cmux.com/language-packs/x/de.tar.zst";
     let manifest = parse_manifest(&good(url, SHA_A, 10)).unwrap();
-    assert_eq!(manifest.packs["de"], Pack { url: url.into(), sha256: SHA_A.into(), size: 10 });
+    assert_eq!(
+        manifest.packs["de"],
+        Pack {
+            url: url.into(),
+            sha256: SHA_A.into(),
+            size: 10
+        }
+    );
     assert!(parse_manifest(br#"{"version": 1, "packs": {}}"#).is_ok());
 
     let bad = [
@@ -172,11 +186,23 @@ fn english_no_manifest_and_no_pack_are_bundled() {
     let folder = Folder::new("bundled");
     let cache = folder.path().join("cache");
     let missing = folder.path().join("missing.json");
-    assert_eq!(ensure(&request("en", missing.clone(), cache.clone())), Outcome::Bundled);
-    assert_eq!(ensure(&request("", missing.clone(), cache.clone())), Outcome::Bundled);
-    assert_eq!(ensure(&request("de", missing, cache.clone())), Outcome::Bundled);
+    assert_eq!(
+        ensure(&request("en", missing.clone(), cache.clone())),
+        Outcome::Bundled
+    );
+    assert_eq!(
+        ensure(&request("", missing.clone(), cache.clone())),
+        Outcome::Bundled
+    );
+    assert_eq!(
+        ensure(&request("de", missing, cache.clone())),
+        Outcome::Bundled
+    );
     let manifest = manifest_file(folder.path(), json!({}));
-    assert_eq!(ensure(&request("ja", manifest, cache.clone())), Outcome::Bundled);
+    assert_eq!(
+        ensure(&request("ja", manifest, cache.clone())),
+        Outcome::Bundled
+    );
     assert!(!cache.exists(), "a bundled answer makes no cache folder");
 }
 
@@ -189,7 +215,9 @@ fn a_bad_manifest_is_unavailable() {
     assert_eq!(outcome, Outcome::Unavailable(Code::BadManifest));
     assert_eq!(outcome.to_json()["code"], "language_packs.bad_manifest");
     assert_eq!(outcome.to_json()["state"], "unavailable");
-    assert!(outcome.to_json()["message"].as_str().is_some_and(|text| !text.is_empty()));
+    assert!(outcome.to_json()["message"]
+        .as_str()
+        .is_some_and(|text| !text.is_empty()));
 }
 
 #[test]
@@ -206,7 +234,10 @@ fn a_complete_pack_is_ready_without_network() {
     );
     let outcome = ensure(&request("de", manifest, cache));
     assert_eq!(outcome, Outcome::Ready(root.clone()));
-    assert_eq!(outcome.to_json(), json!({"state": "ready", "root": root.to_string_lossy()}));
+    assert_eq!(
+        outcome.to_json(),
+        json!({"state": "ready", "root": root.to_string_lossy()})
+    );
 }
 
 #[test]
@@ -223,7 +254,10 @@ fn a_pack_without_its_marker_is_downloaded_again() {
     );
     let outcome = ensure(&request("de", manifest, cache.clone()));
     assert_eq!(outcome, Outcome::Ready(cache.join(&sha256)));
-    assert!(cache.join(&sha256).join("de.lproj/Localizable.strings").is_file());
+    assert!(cache
+        .join(&sha256)
+        .join("de.lproj/Localizable.strings")
+        .is_file());
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);
 }
 
@@ -233,7 +267,10 @@ fn a_pack_downloads_once_unpacks_and_prunes_the_old_ones() {
     let cache = folder.path().join("cache");
     let body = archive(&[
         ("./de.lproj", None),
-        ("./de.lproj/Localizable.strings", Some(b"\"Hello\" = \"Hallo\";")),
+        (
+            "./de.lproj/Localizable.strings",
+            Some(b"\"Hello\" = \"Hallo\";"),
+        ),
         ("de.lproj/nested/Other.strings", Some(b"x")),
     ]);
     let sha256 = sha(&body);
@@ -267,17 +304,33 @@ fn a_pack_downloads_once_unpacks_and_prunes_the_old_ones() {
     for thread in threads {
         assert_eq!(thread.join().unwrap(), Outcome::Ready(root.clone()));
     }
-    assert_eq!(server.requests.load(Ordering::SeqCst), 1, "one download for every request");
+    assert_eq!(
+        server.requests.load(Ordering::SeqCst),
+        1,
+        "one download for every request"
+    );
     assert_eq!(
         std::fs::read(root.join("de.lproj/Localizable.strings")).unwrap(),
         b"\"Hello\" = \"Hallo\";"
     );
     assert!(root.join("de.lproj/nested/Other.strings").is_file());
-    assert_eq!(std::fs::read_to_string(root.join(COMPLETE)).unwrap(), sha256);
+    assert_eq!(
+        std::fs::read_to_string(root.join(COMPLETE)).unwrap(),
+        sha256
+    );
 
-    assert!(!cache.join(SHA_A).exists(), "a pack the manifest no longer names goes");
-    assert!(cache.join(SHA_B).exists(), "a pack of another listed language stays");
-    assert!(cache.join(".partial-fresh").exists(), "a partial of a running install stays");
+    assert!(
+        !cache.join(SHA_A).exists(),
+        "a pack the manifest no longer names goes"
+    );
+    assert!(
+        cache.join(SHA_B).exists(),
+        "a pack of another listed language stays"
+    );
+    assert!(
+        cache.join(".partial-fresh").exists(),
+        "a partial of a running install stays"
+    );
     assert!(!stale.exists(), "a partial older than an hour goes");
     assert!(cache.join("unrelated.txt").exists());
     let leftovers: Vec<_> = std::fs::read_dir(&cache)
@@ -286,7 +339,11 @@ fn a_pack_downloads_once_unpacks_and_prunes_the_old_ones() {
         .filter(|entry| entry.file_name().to_string_lossy().contains(&sha256[..16]))
         .map(|entry| entry.file_name())
         .collect();
-    assert_eq!(leftovers, vec![std::ffi::OsString::from(&sha256)], "no download file is left");
+    assert_eq!(
+        leftovers,
+        vec![std::ffi::OsString::from(&sha256)],
+        "no download file is left"
+    );
 }
 
 #[test]
@@ -295,9 +352,11 @@ fn a_hash_or_size_mismatch_is_verify_and_leaves_nothing() {
     let cache = folder.path().join("cache");
     let body = archive(&[("de.lproj/Localizable.strings", Some(b"x"))]);
     let server = Server::start(body.clone());
-    for (sha256, size) in
-        [(SHA_A.to_owned(), body.len()), (sha(&body), body.len() - 1), (sha(&body), body.len() + 1)]
-    {
+    for (sha256, size) in [
+        (SHA_A.to_owned(), body.len()),
+        (sha(&body), body.len() - 1),
+        (sha(&body), body.len() + 1),
+    ] {
         let manifest = manifest_file(
             folder.path(),
             json!({"de": {"url": server.url, "sha256": sha256, "size": size}}),
@@ -331,8 +390,14 @@ fn unpack_refuses_names_that_escape_links_and_the_marker() {
     let folder = Folder::new("escape");
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("parent", archive(&[("../evil", Some(b"x"))])),
-        ("nested parent", archive(&[("de.lproj/../../evil", Some(b"x"))])),
-        ("absolute", archive(&[("/tmp/cmux-language-packs-evil", Some(b"x"))])),
+        (
+            "nested parent",
+            archive(&[("de.lproj/../../evil", Some(b"x"))]),
+        ),
+        (
+            "absolute",
+            archive(&[("/tmp/cmux-language-packs-evil", Some(b"x"))]),
+        ),
         ("marker", archive(&[(COMPLETE, Some(b"x"))])),
         ("not zstd", b"plain bytes".to_vec()),
         ("symlink", {
@@ -373,7 +438,11 @@ fn prune_keeps_listed_packs_and_young_partials() {
     assert!(cache.join(".partial-young").exists());
     assert!(cache.join(".partial-young.tar.zst").exists());
     // Two hours on, both partials are stale.
-    prune(cache, &keep, SystemTime::now() + Duration::from_secs(2 * 60 * 60));
+    prune(
+        cache,
+        &keep,
+        SystemTime::now() + Duration::from_secs(2 * 60 * 60),
+    );
     assert!(!cache.join(".partial-young").exists());
     assert!(!cache.join(".partial-young.tar.zst").exists());
     assert!(cache.join(SHA_A).exists());
@@ -388,8 +457,15 @@ fn a_request_needs_absolute_paths() {
             .unwrap()
     };
     let parsed = parse_request(&fields("/a/language-packs.json", "/c")).unwrap();
-    assert_eq!(parsed, request("de", "/a/language-packs.json".into(), "/c".into()));
-    for (manifest, cache) in [("relative.json", "/c"), ("/a.json", "c"), ("/a/../b.json", "/c")] {
+    assert_eq!(
+        parsed,
+        request("de", "/a/language-packs.json".into(), "/c".into())
+    );
+    for (manifest, cache) in [
+        ("relative.json", "/c"),
+        ("/a.json", "c"),
+        ("/a/../b.json", "/c"),
+    ] {
         let error = parse_request(&fields(manifest, cache)).unwrap_err();
         assert_eq!(error.code, "validation.invalid");
     }
